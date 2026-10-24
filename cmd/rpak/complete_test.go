@@ -95,12 +95,14 @@ func TestCompleteClean(t *testing.T) {
 		argv []string
 		want string
 	}{
-		{[]string{"rpak clean --", "13", "--"}, "--verbose \n--ostree-verbose \n--help \n--dry-run \n--user \n--system \n--installation=\n"},
-		{[]string{"rpak clean -", "12", "-"}, "--verbose \n-v \n--ostree-verbose \n--help \n-h \n--dry-run \n--user \n-u \n--system \n--installation=\n"},
-		{[]string{"rpak -v clean --d", "17", "--d"}, "--dry-run \n"},
-		{[]string{"rpak -vv --ostree-verbose clean --d", "35", "--d"}, "--dry-run \n"},
+		{[]string{"rpak clean --", "13", "--"}, "--verbose \n--ostree-verbose \n--help \n--dry-run \n--delete-data \n--user \n--system \n--installation=\n"},
+		{[]string{"rpak clean -", "12", "-"}, "--verbose \n-v \n--ostree-verbose \n--help \n-h \n--dry-run \n--delete-data \n--user \n-u \n--system \n--installation=\n"},
+		{[]string{"rpak -v clean --d", "17", "--d"}, "--dry-run \n--delete-data \n"},
+		{[]string{"rpak -vv --ostree-verbose clean --d", "35", "--d"}, "--dry-run \n--delete-data \n"},
+		{[]string{"rpak clean --de", "15", "--de"}, "--delete-data \n"},
+		{[]string{"rpak clean --delete-data --d", "28", "--d"}, "--dry-run \n"},
 		// Switches already given are not offered again; -v may be repeated.
-		{[]string{"rpak clean --dry-run -uv --ostree-verbose -", "43", "-"}, "--verbose \n-v \n--help \n-h \n--system \n--installation=\n"},
+		{[]string{"rpak clean --dry-run -uv --ostree-verbose -", "43", "-"}, "--verbose \n-v \n--help \n-h \n--delete-data \n--system \n--installation=\n"},
 		{[]string{"rpak clean --user --us", "22", "--us"}, ""},
 		// clean takes no arguments.
 		{[]string{"rpak clean ", "11", ""}, ""},
@@ -219,7 +221,7 @@ func TestCompleteOddInput(t *testing.T) {
 		{[]string{"rpak \xff\xfe clean -", "100", "-"}, "list \n"},
 		{[]string{"rpak clean \"ü x\" 'y' --sys", "26", "--sys"}, "--system \n"},
 		{[]string{"rpak clean ü --sys", "18", "--sys"}, "--system \n"},
-		{[]string{"rpak \tclean\n--d", "15", "--d"}, "--dry-run \n"},
+		{[]string{"rpak \tclean\n--d", "15", "--d"}, "--dry-run \n--delete-data \n"},
 	} {
 		if out, code := e.complete(nil, c.argv...); code != 0 || out != c.want {
 			t.Errorf("%q: exit %d, output %q, want %q", c.argv, code, out, c.want)

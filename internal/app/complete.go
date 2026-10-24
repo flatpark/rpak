@@ -301,6 +301,7 @@ var cleanFlags = []cleanFlag{
 	{long: "ostree-verbose"},
 	{long: "help", short: 'h'},
 	{long: "dry-run"},
+	{long: "delete-data"},
 	{long: "user", short: 'u'},
 	{long: "system"},
 	{long: "installation", value: true},
