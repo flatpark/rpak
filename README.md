@@ -2,7 +2,9 @@
 
 rpak wraps `flatpak update` and `flatpak install`: it first downloads the
 original installers that extra-data apps need, **several at a time**, and then
-runs your system's flatpak with exactly the arguments you gave it.
+runs your system's flatpak with exactly the arguments you gave it. Afterwards
+it frees the copy of those installers that flatpak keeps in its repository,
+and `rpak clean` does the same for everything installed before.
 
 ## Why
 
@@ -39,13 +41,15 @@ Type `rpak` instead of `flatpak`. The arguments go to flatpak unchanged:
 rpak update                         # flatpak update, after prefetching what the pending updates need
 rpak update --user -y com.google.Chrome
 rpak install flatpark com.google.Chrome us.zoom.Zoom
+rpak clean --dry-run                # what rpak clean would free (see below)
 rpak list --app                     # any other command: rpak execs flatpak with it as is
 ```
 
 Only `install` and `update` (and its alias `upgrade`, also after leading
-`-v`/`--verbose`/`--ostree-verbose`) prefetch. Every other command, and
-`--help` on any command, replaces rpak with flatpak right away, so `rpak`
-can stand in for `flatpak` everywhere, aliases included.
+`-v`/`--verbose`/`--ostree-verbose`) prefetch, and `clean` is rpak's own.
+Every other command, and `--help` on any of them but `clean`, replaces rpak
+with flatpak right away, so `rpak` can stand in for `flatpak` everywhere,
+aliases included.
 
 Example output (one line per event when stderr is not a terminal; on a
 terminal, a block with a line per active download and a summary line is
@@ -67,14 +71,19 @@ rpak: prefetch done: 3 ready (3 downloaded, 0 reused), 0 skipped/failed, 14.2s
 ```
 
 If there is nothing to prefetch, rpak prints nothing and goes straight to
-flatpak.
+flatpak. After flatpak, if it succeeded and there was space to free (see
+[Cleaning up](#cleaning-up)), rpak prints one more line:
+
+```
+rpak: freed 29.0 MB of cached extra-data
+```
 
 | Command / variable | Effect |
 |---|---|
 | `rpak --version` | rpak's version, then `flatpak --version` |
 | `rpak help`, `rpak --help` | rpak's usage (`flatpak --help` for flatpak's) |
 | `RPAK_JOBS=N` | concurrent downloads, 1–16, default 4 (at most 4 per host) |
-| `RPAK_DRY_RUN=1` | only print the prefetch plan and the flatpak command; no downloads, flatpak is not run |
+| `RPAK_DRY_RUN=1` | only print the prefetch plan and the flatpak command; no downloads, flatpak is not run, nothing is cleaned |
 | `RPAK_FLATPAK=/path/to/flatpak` | flatpak executable to use (default: `flatpak` from `PATH`) |
 
 Downloads honour `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`.
@@ -131,6 +140,93 @@ path or name is just a miss, and flatpak downloads the file itself.
 Ctrl-C while prefetching stops all downloads and keeps the `.part` files.
 rpak then exits with 130 (143 for SIGTERM) without running flatpak.
 
+## Cleaning up
+
+When stock flatpak pulls an extra-data app, it puts the downloaded
+installers, whole, into the detached metadata of the commit
+(`repo/objects/XX/CHECKSUM.commitmeta`, key `xa.extra-data`). Once the app is
+deployed they are never read again (only `flatpak install --no-pull` of the
+same commit would), yet they stay there, one more copy with every update of
+the app. That is easily gigabytes. The same file also holds the commit's
+signatures (`ostree.gpgsigs`), so it cannot simply be deleted.
+
+**After `rpak install` and `rpak update`.** When flatpak exits with 0, rpak
+removes `xa.extra-data` from every commit in the repositories of the
+installations the command used (`--user`, `--system`, `--installation=NAME`,
+or by default the user and the default system installation), and prints a
+total. It never waits: if another flatpak is busy with a repository, rpak
+skips it with a warning. A system installation that rpak cannot write to (you
+are not root) is only looked at: if there is something to free, rpak says
+`run "sudo rpak clean --system" to free X`. Nothing here changes rpak's exit
+code, which is always flatpak's. `RPAK_DRY_RUN=1` skips it.
+
+**`rpak clean`** does that for all installations, and removes leftovers:
+
+```
+rpak clean [--user | --system | --installation=NAME]... [--dry-run] [-v]
+```
+
+- `xa.extra-data` in the detached metadata of every commit, deployed or not.
+  Only that key is removed; every other entry (signatures and all) is copied
+  byte for byte.
+- rpak's own prefetch directories in `<user base dir>/extra-data`: those with
+  a `.rpak-prefetch` marker, including `.part` files of interrupted downloads
+  and files kept for a retry. Directories without the marker are never
+  touched, flatpak's own `.flatpak-prefetch` ones included. Skipped while
+  another rpak is prefetching.
+- Leftovers: directories under `repo/refs/{heads,remotes,mirrors}` that hold
+  only empty directories; `repo/state/CHECKSUM.commitpartial` markers of
+  commits that no longer exist; checkouts of interrupted deploys
+  (`{app,runtime}/ID/ARCH/BRANCH/.CHECKSUM-XXXXXX`); `ID/ARCH/BRANCH`
+  directories that an install interrupted before its first deploy left
+  empty (nothing inside a deployment is ever looked at); and old
+  deployments in `.removed` that no running app holds a lock on, which is
+  what flatpak itself does after most transactions.
+
+Without options it looks at the default system installation, the user
+installation and every installation configured in
+`/etc/flatpak/installations.d`, with a heading for each. Each removed item
+gets a line, and a total ends the output:
+
+```
+$ rpak clean
+System installation (default):
+2410.3 MB  flathub:app/com.example.Big/x86_64/stable
+System installation (default): would free 2.5 GB; run "sudo rpak clean --system"
+User installation:
+10.7 MB  deploy/app/app.audionaut.Audionaut/x86_64/stable
+0.0 MB  /home/me/.local/share/flatpak/repo/refs: 4 empty directories
+Freed: 2 objects, 0.01 GB
+```
+
+A system installation you cannot write to is only inspected, like above; one
+you name explicitly (`--system`) is an error then. `--dry-run` only reports
+and changes nothing at all, not even lock files. `-v` also lists what is kept
+and why. `rpak clean` exits with 1 if an installation could not be cleaned
+(busy, not writable, an I/O error), 2 for a usage error.
+
+How it works, and why it is safe:
+
+- The detached metadata is a GVariant `a{sv}`. rpak reads its framing
+  (following GLib's `gvariant-serialiser.c`), drops the `xa.extra-data`
+  entry and writes the others back unchanged with new framing. The result is
+  byte for byte what GLib would serialise for the same dictionary without
+  that key; the test suite checks this against fixtures that GLib made,
+  including a real commitmeta. A file that is not in GVariant normal form,
+  or anything else rpak is not sure about, is left alone with a warning. The
+  new file is written next to the old one, synced, given the old one's
+  permissions and renamed over it. The installers are memory-mapped, not
+  read.
+- While changing a repository, rpak holds the same two locks as `flatpak
+  clean` of FlatPark's flatpak fork, without waiting for either: ostree's
+  repository lock `repo/.lock`, and flatpak's `repo-lock`, both exclusive.
+  They are OFD locks (`fcntl(F_OFD_SETLK)`) like the ones libglnx and ostree
+  take, so they really exclude a running flatpak; `flock()` would not see
+  them. Pulls and deploys hold both shared.
+- The rules for leftovers, and the output, are those of `flatpak clean` in
+  [FlatPark's flatpak fork](https://github.com/flatpark/flatpak), which does
+  the same in C. rpak works with the stock flatpak of your distribution.
+
 ## Limitations
 
 - Only commands run through rpak prefetch anything. GUI stores (GNOME
@@ -151,3 +247,13 @@ rpak then exits with 130 (143 for SIGTERM) without running flatpak.
 - Files are not locked while flatpak reads them. If two rpak runs install the
   same app at the same time, the worst case is that one misses and flatpak
   downloads that file itself.
+- Installs and updates that do not go through rpak keep adding installers to
+  the repository until the next `rpak install`, `rpak update` or
+  `rpak clean`.
+- A commit stripped of `xa.extra-data` cannot be deployed again without
+  downloading: `flatpak install --no-pull` or `flatpak update --no-pull` of
+  that same commit fails, a normal install or update downloads the
+  installers again.
+- `rpak clean` does not remove `-origin` remotes of uninstalled bundles nor
+  the data of uninstalled apps (`flatpak clean --delete-data` of the fork
+  does).
