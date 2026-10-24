@@ -143,7 +143,8 @@ func run(version string, argv []string) int {
 		}
 	}()
 
-	dirs, runFlatpak := prefetchPhase(ctx, version, kind, flatpak, flatpakArgs, argv)
+	prep := prefetchPhase(ctx, version, kind, flatpak, flatpakArgs, argv)
+	defer prep.unlock()
 
 	cmd := exec.Command(flatpak, argv...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -155,7 +156,7 @@ func run(version string, argv []string) int {
 		fmt.Fprintf(os.Stderr, "rpak: interrupted, not running flatpak; partial downloads are kept for the next run\n")
 		return 128 + int(sig.(syscall.Signal))
 	}
-	if !runFlatpak { // dry run
+	if !prep.runFlatpak { // dry run
 		mu.Unlock()
 		return 0
 	}
@@ -173,9 +174,9 @@ func run(version string, argv []string) int {
 	// Remove what we placed only when flatpak succeeded; after a failure or
 	// a "no" at its prompt the files are kept for the next attempt (and
 	// expire after prefetch.MaxAge).
-	if code == 0 && len(dirs) > 0 {
+	if code == 0 && len(prep.dirs) > 0 {
 		if baseDir, err := prefetch.DefaultUserBaseDir(); err == nil {
-			if err := prefetch.RemoveDirs(baseDir, dirs); err != nil {
+			if err := prefetch.RemoveDirs(baseDir, prep.dirs); err != nil {
 				fmt.Fprintf(os.Stderr, "rpak: warning: cleaning up prefetched files: %v\n", err)
 			}
 		}
@@ -200,33 +201,58 @@ func exitCode(err error) int {
 	return 1
 }
 
-// prefetchPhase plans and downloads. It never fails: problems are reported
-// as warnings and only reduce what is prefetched. It returns the
-// directories to remove after a successful flatpak run, and false for a
-// dry run, after which flatpak must not be run.
+// prepared is the outcome of prefetchPhase.
+type prepared struct {
+	// dirs are the directories to remove after a successful flatpak run.
+	dirs []string
+	// runFlatpak is false for a dry run, after which flatpak must not run.
+	runFlatpak bool
+	// unlock releases the prefetch directories (see prefetch.LockShared)
+	// once they have been removed; it may be called more than once.
+	unlock func()
+}
+
 // prefetchPhase plans and runs the downloads for command ("update" or
 // "install"); fullArgv is what flatpak will get, for the dry-run output.
-func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpakArgs, fullArgv []string) ([]string, bool) {
+// It never fails: problems are reported as warnings and only reduce what
+// is prefetched.
+func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpakArgs, fullArgv []string) prepared {
 	warn := func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, "rpak: warning: "+format+"\n", a...)
 	}
 	dryRun := os.Getenv("RPAK_DRY_RUN") != "" && os.Getenv("RPAK_DRY_RUN") != "0"
+	parsed := args.Parse(command, flatpakArgs)
+	prep := prepared{runFlatpak: !dryRun, unlock: func() {}}
 
 	baseDir, err := prefetch.DefaultUserBaseDir()
 	if err != nil {
 		warn("cannot find the flatpak user directory, not prefetching: %v", err)
-		return nil, !dryRun
+		return prep
+	}
+	locked := false
+	lockDirs := func(create bool) bool {
+		release, ok, err := prefetch.LockShared(baseDir, create)
+		if err != nil {
+			warn("not prefetching: %v", err)
+			return false
+		}
+		var once sync.Once
+		prep.unlock = func() { once.Do(release) }
+		locked = ok
+		return true
 	}
 	if !dryRun {
+		if !lockDirs(false) {
+			return prep
+		}
 		if err := prefetch.RemoveExpired(baseDir, time.Now(), prefetch.MaxAge); err != nil {
 			warn("removing expired prefetched files: %v", err)
 		}
 	}
 
-	parsed := args.Parse(command, flatpakArgs)
 	p := plan.Build(ctx, plan.ExecRunner{Path: flatpak, Timeout: queryTimeout}, parsed)
 	if ctx.Err() != nil {
-		return nil, true
+		return prep
 	}
 	for _, w := range p.Warnings {
 		warn("%s", w)
@@ -238,10 +264,16 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 		}
 		printPlan(os.Stderr, p.Sources, baseDir)
 		fmt.Fprintf(os.Stderr, "rpak: dry run, would run: %s\n", shellQuote(append([]string{flatpak}, fullArgv...)))
-		return nil, false
+		return prep
 	}
 	if len(p.Sources) == 0 {
-		return nil, true
+		return prep
+	}
+	if !locked {
+		prep.unlock()
+		if !lockDirs(true) {
+			return prep
+		}
 	}
 
 	printPlan(os.Stderr, p.Sources, "")
@@ -250,12 +282,13 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 	start := time.Now()
 	summary := download(ctx, cfg, p.Sources)
 	if ctx.Err() != nil {
-		return nil, true
+		return prep
 	}
 	ok := summary.Downloaded + summary.Reused
 	fmt.Fprintf(os.Stderr, "rpak: prefetch done: %d ready (%d downloaded, %d reused), %d skipped/failed, %s\n",
 		ok, summary.Downloaded, summary.Reused, summary.Skipped+summary.Failed, time.Since(start).Round(100*time.Millisecond))
-	return summary.Dirs, true
+	prep.dirs = summary.Dirs
+	return prep
 }
 
 func jobs(warn func(string, ...any)) int {
