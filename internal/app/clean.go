@@ -29,6 +29,9 @@ Frees the space stock flatpak leaves behind:
     directories of interrupted installs, and old deployments in .removed
     that no running app uses
 
+The data of apps that are no longer installed anywhere (~/.var/app/ID and
+overrides) is listed with the user installation, but never deleted.
+
 By default the default system installation, the user installation and
 every other configured installation are looked at. System installations
 that are not writable are only inspected; run "sudo rpak clean --system"
@@ -240,12 +243,51 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	for _, inst := range insts {
+		if inst.User {
+			listAppData(stdout, inst.Path)
+			break
+		}
+	}
+
 	verb := "Freed"
 	if opts.dryRun {
 		verb = "Would free"
 	}
 	fmt.Fprintf(stdout, "%s: %d objects, %.2f GB\n", verb, objects, float64(freed)/(1024*1024*1024))
 	return code
+}
+
+// listAppData lists what clean_app_data() of the fork's flatpak clean lists
+// without --delete-data. rpak has no --delete-data: it never deletes the
+// user's data.
+func listAppData(stdout io.Writer, userBase string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	var paths []string
+	for _, inst := range (installation.Env{}).All() {
+		paths = append(paths, inst.Path)
+	}
+	apps := clean.UninstalledAppData(home, userBase, paths)
+	if len(apps) == 0 {
+		return
+	}
+	fmt.Fprintln(stdout, "Data of apps that are no longer installed:")
+	var total int64
+	for _, a := range apps {
+		what := a.ID
+		if a.Data {
+			what += "  ~/.var/app"
+		}
+		if a.Override {
+			what += "  overrides"
+		}
+		fmt.Fprintf(stdout, "%s  %s\n", mb(a.Size), what)
+		total += a.Size
+	}
+	fmt.Fprintf(stdout, "Kept %s; rpak does not delete app data\n", formatSize(total))
 }
 
 // cleanRepo is clean_repo(): checks that the repository may be changed,

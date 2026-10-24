@@ -660,3 +660,103 @@ func diskUsage(path string) int64 {
 	})
 	return total
 }
+
+// --- data of apps that are no longer installed (listed, never deleted)
+
+// AppData is what an app that is no longer installed left for the user.
+type AppData struct {
+	ID string
+	// Data reports whether ~/.var/app/ID exists; Size is its disk usage.
+	Data bool
+	Size int64
+	// Override reports whether <user base dir>/overrides/ID exists.
+	Override bool
+}
+
+// UninstalledAppData is the detection of clean_app_data() in the fork's
+// flatpak clean: the names in ~/.var/app and <user base dir>/overrides
+// that are D-Bus names and not the ID of an app installed in any of the
+// installations, sorted. An app counts as installed where
+// app/ID/current exists, as flatpak_find_current_ref() checks it in the
+// user and every system installation. rpak only lists these: the data is
+// the user's.
+func UninstalledAppData(home, userBase string, installations []string) []AppData {
+	varApp := filepath.Join(home, ".var", "app")
+	overrides := filepath.Join(userBase, "overrides")
+	ids := make(map[string]bool)
+	for _, dir := range []string{varApp, overrides} {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			ids[e.Name()] = true
+		}
+	}
+	var out []AppData
+	for id := range ids {
+		if !dbusName(id) || installed(id, installations) {
+			continue
+		}
+		a := AppData{ID: id}
+		// g_file_query_exists() follows symlinks.
+		if _, err := os.Stat(filepath.Join(varApp, id)); err == nil {
+			a.Data = true
+			a.Size = diskUsage(filepath.Join(varApp, id))
+		}
+		if _, err := os.Stat(filepath.Join(overrides, id)); err == nil {
+			a.Override = true
+		}
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// installed is flatpak_find_current_ref() != NULL. flatpak also requires
+// the target of the current symlink to make a valid ref; rpak takes any
+// app/ID/current as installed, so that it never calls the data of an
+// installed app left over.
+func installed(id string, installations []string) bool {
+	for _, inst := range installations {
+		if _, err := os.Lstat(filepath.Join(inst, "app", id, "current")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// dbusName is g_dbus_is_name() of GLib's gio/gdbusutils.c: a unique
+// (":1.42") or well-known ("org.example.App") bus name.
+func dbusName(name string) bool {
+	if len(name) == 0 || len(name) > 255 {
+		return false
+	}
+	if name[0] == ':' {
+		return validName(name[1:], true)
+	}
+	return busNameChar(name[0], false) && validName(name[1:], false)
+}
+
+// validName is is_valid_name (s, len, allow_initial_digit, TRUE).
+func validName(s string, initialDigit bool) bool {
+	if s == "" {
+		return false
+	}
+	hasDot := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			i++
+			if i == len(s) || !busNameChar(s[i], initialDigit) {
+				return false
+			}
+			hasDot = true
+		} else if !busNameChar(s[i], true) {
+			return false
+		}
+	}
+	return hasDot
+}
+
+// busNameChar is is_valid_bus_name_character (c, TRUE), or with digit
+// false is_valid_initial_bus_name_character (c, FALSE, TRUE).
+func busNameChar(c byte, digit bool) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c == '_' || c == '-' || digit && c >= '0' && c <= '9'
+}

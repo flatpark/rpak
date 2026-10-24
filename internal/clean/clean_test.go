@@ -451,6 +451,52 @@ func equal(a, b []string) bool {
 	return strings.Join(a, "\n") == strings.Join(b, "\n")
 }
 
+func TestUninstalledAppData(t *testing.T) {
+	home, user, system := t.TempDir(), t.TempDir(), t.TempDir()
+	varApp := filepath.Join(home, ".var", "app")
+	write(t, filepath.Join(varApp, "org.example.Gone", "cache", "x"), make([]byte, 20000), 0o644)
+	write(t, filepath.Join(user, "overrides", "org.example.Gone"), []byte("[Context]\n"), 0o644)
+	write(t, filepath.Join(user, "overrides", "org.example.OnlyOverride"), []byte("[Context]\n"), 0o644)
+	mkdir(t, filepath.Join(varApp, "org.example.InUser"))
+	mkdir(t, filepath.Join(varApp, "org.example.InSystem"))
+	mkdir(t, filepath.Join(varApp, "not-an-id"))
+	mkdir(t, filepath.Join(varApp, "org.1digit.App"))
+	os.Symlink("x86_64/stable", filepath.Join(mkdirp(t, user, "app", "org.example.InUser"), "current"))
+	os.Symlink("x86_64/stable", filepath.Join(mkdirp(t, system, "app", "org.example.InSystem"), "current"))
+	// installed without data: not listed either way
+	os.Symlink("x86_64/stable", filepath.Join(mkdirp(t, user, "app", "org.example.NoData"), "current"))
+
+	before := treeState(t, home) + treeState(t, user)
+	got := UninstalledAppData(home, user, []string{user, system})
+	var s []string
+	for _, a := range got {
+		s = append(s, fmt.Sprintf("%s data=%v override=%v big=%v", a.ID, a.Data, a.Override, a.Size >= 20000))
+	}
+	want := []string{
+		"org.example.Gone data=true override=true big=true",
+		"org.example.OnlyOverride data=false override=true big=false",
+	}
+	if !equal(s, want) {
+		t.Errorf("got %q, want %q", s, want)
+	}
+	if after := treeState(t, home) + treeState(t, user); after != before {
+		t.Error("listing app data changed files")
+	}
+}
+
+func TestDBusName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"org.example.App": true, "org.example.App-1": true, "a.b": true, "_a.b_": true,
+		"org.example": true, "com.example.App.Sub": true, ":1.42": true, ":.a": true,
+		"": false, "org": false, ".org.a": false, "org.": false, "org..a": false, "org.1a": false,
+		"1org.a": false, "org/a.b": false, "org.ü.b": false, ":1": false, strings.Repeat("a.", 128) + "a": false,
+	} {
+		if got := dbusName(name); got != want {
+			t.Errorf("%q: %v, want %v", name, got, want)
+		}
+	}
+}
+
 // TestReadDirOrder: entries come in inode order, as GLib's enumerator
 // returns them, whatever readdir() order the file system has.
 func TestReadDirOrder(t *testing.T) {
@@ -480,4 +526,24 @@ func TestReadDirOrder(t *testing.T) {
 	if _, err := readDir(filepath.Join(dir, "missing")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("missing directory: %v", err)
 	}
+}
+
+func mkdirp(t *testing.T, parts ...string) string {
+	t.Helper()
+	path := filepath.Join(parts...)
+	mkdir(t, path)
+	return path
+}
+
+// treeState lists everything below root with mode, size and mtime.
+func treeState(t *testing.T, root string) string {
+	t.Helper()
+	var b strings.Builder
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err == nil {
+			fmt.Fprintf(&b, "%s %v %d %d\n", path, info.Mode(), info.Size(), info.ModTime().UnixNano())
+		}
+		return nil
+	})
+	return b.String()
 }

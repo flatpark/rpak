@@ -287,3 +287,16 @@ func (e Env) Select(options []string, all bool) ([]Installation, []string, error
 	}
 	return out, warnings, nil
 }
+
+// All is every installation flatpak knows of: the user installation and
+// the system ones (flatpak_dir_get_system_list()), as
+// flatpak_find_current_ref() searches them.
+func (e Env) All() []Installation {
+	var out []Installation
+	if user, err := e.User(); err == nil {
+		out = append(out, user)
+	}
+	out = append(out, e.SystemDefault())
+	configured, _ := e.Configured()
+	return append(out, configured...)
+}

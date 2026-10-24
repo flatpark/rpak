@@ -88,6 +88,7 @@ type env struct {
 	base string // FLATPAK_USER_DIR
 	sys  string // FLATPAK_SYSTEM_DIR; FLATPAK_CONFIG_DIR is empty
 	conf string
+	home string // HOME if set, else a new temporary directory per run
 	srv  *httptest.Server
 	hits atomic.Int64
 
@@ -180,6 +181,10 @@ type outcome struct {
 }
 
 func (e *env) command(argv ...string) *exec.Cmd {
+	home := e.home
+	if home == "" {
+		home = e.t.TempDir()
+	}
 	cmd := exec.Command(os.Args[0], argv...)
 	cmd.Env = append(os.Environ(),
 		"RPAK_TEST_AS_MAIN=1",
@@ -188,7 +193,7 @@ func (e *env) command(argv ...string) *exec.Cmd {
 		"FLATPAK_USER_DIR="+e.base,
 		"FLATPAK_SYSTEM_DIR="+e.sys,
 		"FLATPAK_CONFIG_DIR="+e.conf,
-		"HOME="+e.t.TempDir(),
+		"HOME="+home,
 		"RPAK_DRY_RUN=",
 		"RPAK_JOBS=",
 	)

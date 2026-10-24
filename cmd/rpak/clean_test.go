@@ -191,17 +191,19 @@ func (e *env) runOut(argv ...string) (code int, stdout, stderr string) {
 
 func TestCleanDryRunChangesNothing(t *testing.T) {
 	e := newEnv(t)
+	e.home = t.TempDir()
 	installation(t, e.base)
 	installation(t, e.sys)
 	leftovers(t, e.base, true)
 	leftovers(t, e.sys, false)
-	before := snapshot(t, e.base) + snapshot(t, e.sys)
+	appData(t, e)
+	before := snapshot(t, e.base) + snapshot(t, e.sys) + snapshot(t, e.home)
 
 	code, stdout, stderr := e.runOut("clean", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
 	}
-	if after := snapshot(t, e.base) + snapshot(t, e.sys); after != before {
+	if after := snapshot(t, e.base) + snapshot(t, e.sys) + snapshot(t, e.home); after != before {
 		t.Errorf("dry run changed files:\nbefore\n%s\nafter\n%s", before, after)
 	}
 	freed := len(fixture(t, "real.gvariant")) - len(fixture(t, "real.stripped.gvariant"))
@@ -214,6 +216,10 @@ func TestCleanDryRunChangesNothing(t *testing.T) {
 		strings.Repeat("c", 64) + ".commitpartial\n",
 		"." + commitB + "-Xy12Zq\n",
 		"extra-data/" + strings.Repeat("d", 64) + "\n",
+		"Data of apps that are no longer installed:\n" +
+			"0.1 MB  org.example.Gone  ~/.var/app  overrides\n" +
+			"0.0 MB  org.example.OnlyOverride  overrides\n" +
+			"Kept ",
 		"Would free: 11 objects, ",
 	} {
 		if !strings.Contains(stdout, want) {
@@ -225,10 +231,30 @@ func TestCleanDryRunChangesNothing(t *testing.T) {
 	}
 }
 
+// appData gives the user data of an app that is gone (listed), of one that
+// is installed in the system installation (not listed) and an override of
+// another one that is gone; and returns the paths, which must all stay.
+func appData(t *testing.T, e *env) []string {
+	t.Helper()
+	gone := filepath.Join(e.home, ".var", "app", "org.example.Gone", "data")
+	put(t, gone, make([]byte, 100_000))
+	here := filepath.Join(e.home, ".var", "app", "org.example.App", "data")
+	put(t, here, []byte("x"))
+	os.MkdirAll(filepath.Join(e.sys, "app", "org.example.App"), 0o755)
+	os.Symlink("x86_64/stable", filepath.Join(e.sys, "app", "org.example.App", "current"))
+	override := filepath.Join(e.base, "overrides", "org.example.Gone")
+	put(t, override, []byte("[Context]\n"))
+	only := filepath.Join(e.base, "overrides", "org.example.OnlyOverride")
+	put(t, only, []byte("[Context]\n"))
+	return []string{gone, here, override, only}
+}
+
 func TestClean(t *testing.T) {
 	e := newEnv(t)
+	e.home = t.TempDir()
 	meta := installation(t, e.base)
 	gone, kept := leftovers(t, e.base, true)
+	kept = append(kept, appData(t, e)...)
 	code, stdout, stderr := e.runOut("clean", "--user")
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
@@ -249,8 +275,9 @@ func TestClean(t *testing.T) {
 			t.Errorf("%s removed", p)
 		}
 	}
-	// One installation: no headings.
-	if strings.Contains(stdout, "installation:") || !strings.Contains(stdout, "Freed: 6 objects") {
+	// One installation: no headings. The app data is listed, not counted.
+	if strings.Contains(stdout, "installation:") || !strings.Contains(stdout, "Freed: 6 objects") ||
+		!strings.Contains(stdout, "org.example.Gone  ~/.var/app  overrides\n") || strings.Contains(stdout, "org.example.App ") {
 		t.Errorf("output:\n%s", stdout)
 	}
 	// The locks are released, repo-lock removed as glnx does.

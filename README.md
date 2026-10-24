@@ -182,6 +182,9 @@ rpak clean [--user | --system | --installation=NAME]... [--dry-run] [-v]
   empty (nothing inside a deployment is ever looked at); and old
   deployments in `.removed` that no running app holds a lock on, which is
   what flatpak itself does after most transactions.
+- The data of apps that are no longer installed in any installation
+  (`~/.var/app/ID` and per-user overrides) is **listed, never deleted**: it
+  is your data. rpak has no `--delete-data`.
 
 Without options it looks at the default system installation, the user
 installation and every installation configured in
@@ -196,6 +199,9 @@ System installation (default): would free 2.5 GB; run "sudo rpak clean --system"
 User installation:
 10.7 MB  deploy/app/app.audionaut.Audionaut/x86_64/stable
 0.0 MB  /home/me/.local/share/flatpak/repo/refs: 4 empty directories
+Data of apps that are no longer installed:
+120.4 MB  com.example.Old  ~/.var/app  overrides
+Kept 126.2 MB; rpak does not delete app data
 Freed: 2 objects, 0.01 GB
 ```
 
@@ -225,7 +231,9 @@ How it works, and why it is safe:
   them. Pulls and deploys hold both shared.
 - The rules for leftovers, and the output, are those of `flatpak clean` in
   [FlatPark's flatpak fork](https://github.com/flatpark/flatpak), which does
-  the same in C. rpak works with the stock flatpak of your distribution.
+  the same in C; items even come in the same order. rpak works with the
+  stock flatpak of your distribution. `test/compare-fork.sh` runs both on
+  the same throwaway installation and diffs their output.
 
 ## Limitations
 
@@ -254,6 +262,6 @@ How it works, and why it is safe:
   downloading: `flatpak install --no-pull` or `flatpak update --no-pull` of
   that same commit fails, a normal install or update downloads the
   installers again.
-- `rpak clean` does not remove `-origin` remotes of uninstalled bundles nor
-  the data of uninstalled apps (`flatpak clean --delete-data` of the fork
-  does).
+- `rpak clean` does not remove `-origin` remotes of uninstalled bundles, and
+  only lists the data of uninstalled apps (`flatpak clean --delete-data` of
+  the fork deletes it and resets the app's portal permissions).
