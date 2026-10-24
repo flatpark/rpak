@@ -188,7 +188,9 @@ total. It never waits: if another flatpak is busy with a repository, rpak
 skips it with a warning. A system installation that rpak cannot write to (you
 are not root) is only looked at: if there is something to free, rpak says
 `run "sudo rpak clean --system" to free X`. Nothing here changes rpak's exit
-code, which is always flatpak's. `RPAK_DRY_RUN=1` skips it.
+code, which is always flatpak's. `RPAK_DRY_RUN=1` skips it, and so does
+`--no-deploy`: what that pulled is deployed later with `--no-pull`, from the
+installers in the repository.
 
 **`rpak clean`** does that for all installations, and removes leftovers:
 

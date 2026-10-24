@@ -134,6 +134,28 @@ func TestSkipOptions(t *testing.T) {
 	}
 }
 
+func TestNoDeploy(t *testing.T) {
+	for _, c := range []struct {
+		command string
+		argv    []string
+		want    bool
+	}{
+		{"install", []string{"--no-deploy", "flathub", "app"}, true},
+		{"update", []string{"-y", "app", "--no-deploy"}, true},
+		{"install", []string{"flathub", "app"}, false},
+		{"install", []string{"flathub", "--", "--no-deploy"}, false},
+	} {
+		p := Parse(c.command, c.argv)
+		if p.NoDeploy != c.want {
+			t.Errorf("%s %q: NoDeploy = %v, want %v", c.command, c.argv, p.NoDeploy, c.want)
+		}
+		// rpak still prefetches: flatpak pulls the commit and the extra-data.
+		if p.SkipReason != "" {
+			t.Errorf("%s %q: skipped (%s)", c.command, c.argv, p.SkipReason)
+		}
+	}
+}
+
 func TestSkipInstallLocations(t *testing.T) {
 	for _, loc := range []string{
 		"/tmp/app.flatpak", "./repo", "../repo", "http://example.com/x.flatpakref",

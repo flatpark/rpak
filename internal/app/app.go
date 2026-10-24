@@ -34,8 +34,9 @@ Commands:
              (see "rpak completion --help" for how to install it)
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
 
-After a successful install or update, rpak removes the copies of the
-extra-data installers that flatpak keeps in the repositories involved.
+After a successful install or update (without --no-deploy), rpak removes
+the copies of the extra-data installers that flatpak keeps in the
+repositories involved.
 
 Options:
   -h, --help     show this help
@@ -197,7 +198,8 @@ func run(version string, argv []string) int {
 	}
 	prep.unlock()
 	// flatpak has just written the installers into the commits it pulled.
-	if code == 0 && prep.parsed.SkipReason != "--help" {
+	// After --no-deploy they are what a later --no-pull deploy installs.
+	if code == 0 && prep.parsed.SkipReason != "--help" && !prep.parsed.NoDeploy {
 		reclaim(prep.parsed.Installations, os.Stderr)
 	}
 	return code

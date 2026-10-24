@@ -27,6 +27,10 @@ type Parsed struct {
 	// remote (local cache, bundles, sideloads, ...), so there is nothing
 	// rpak can prefetch.
 	SkipReason string
+	// NoDeploy reports --no-deploy: flatpak only pulls, and a later
+	// "flatpak install/update --no-pull" deploys from the repository, so
+	// the extra-data in it must stay.
+	NoDeploy bool
 	// Unknown lists options this parser does not know; they are treated as
 	// flags without a value.
 	Unknown []string
@@ -124,6 +128,8 @@ func Parse(command string, argv []string) Parsed {
 				}
 			case "--arch":
 				p.Arch = value
+			case "--no-deploy":
+				p.NoDeploy = true
 			}
 			if !values[name] && !flags[name] && !globalFlags[name] {
 				unknown(name)

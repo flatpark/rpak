@@ -438,6 +438,40 @@ func TestReclaimAfterSuccess(t *testing.T) {
 	}
 }
 
+// TestNoReclaimAfterNoDeploy: what --no-deploy pulled is installed later
+// with --no-pull, from the extra-data in the repository; rpak prefetches as
+// usual but leaves it there.
+func TestNoReclaimAfterNoDeploy(t *testing.T) {
+	for _, command := range []string{"install", "update"} {
+		t.Run(command, func(t *testing.T) {
+			e := newEnv(t)
+			e.write("remotes-user", "flatpark\n")
+			e.write("updates-user", "app/com.example.One/x86_64/stable\tflatpark\n")
+			meta := installation(t, e.base)
+			queryRef := "app/com.example.One/x86_64/stable"
+			if command == "install" {
+				queryRef = "com.example.One"
+			}
+			e.app("user", "flatpark", "app/com.example.One/x86_64/stable", queryRef, 10_000)
+			argv := []string{command, "--user", "-y", "--no-deploy"}
+			if command == "install" {
+				argv = append(argv, "flatpark", "com.example.One")
+			}
+			out := e.run(argv...)
+			if out.code != 0 || strings.Contains(out.stderr, "freed") {
+				t.Fatalf("exit %d\n%s", out.code, out.stderr)
+			}
+			e.assertArgv(argv)
+			if check := e.read("check"); !strings.Contains(check, "ok ") || strings.Contains(check, "MISSING") {
+				t.Errorf("not prefetched: %s\n%s", check, out.stderr)
+			}
+			if b, _ := os.ReadFile(meta); !bytes.Equal(b, fixture(t, "real.gvariant")) {
+				t.Error("xa.extra-data stripped after --no-deploy")
+			}
+		})
+	}
+}
+
 func TestReclaimBusyKeepsExitCode(t *testing.T) {
 	for _, code := range []int{0, 3} {
 		e := newEnv(t)
