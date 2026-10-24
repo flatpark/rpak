@@ -51,22 +51,49 @@ Every other command, and `--help` on any of them but `clean`, replaces rpak
 with flatpak right away, so `rpak` can stand in for `flatpak` everywhere,
 aliases included.
 
-Example output (one line per event when stderr is not a terminal; on a
-terminal, a block with a line per active download and a summary line is
-redrawn in place, and finished files are listed above it):
+Example output on a terminal. The plan comes first; then a block at the
+bottom, redrawn in place, shows each active download and the total with a
+bar, the speed and the time left, and every file that is done leaves a line
+above it. When prefetching ends the block is erased, leaving the plain
+lines and a summary, and flatpak's own output follows:
 
 ```
-rpak: prefetching 3 extra-data file(s), 39.8 MiB:
-  app/app.audionaut.Audionaut/x86_64/stable  audionaut.deb  10.7 MiB  github.com
-  app/com.ferrispad.FerrisPad/x86_64/stable  FerrisPad-linux  13.3 MiB  github.com
-  app/ai.storyteller.soundcraft/x86_64/stable  soundcraft.tar.gz  15.7 MiB  github.com
+rpak: prefetching 3 extra-data file(s):
+
+  ID                         File                  Size  Host
+  app.audionaut.Audionaut    audionaut.deb      11.2 MB  github.com
+  com.ferrispad.FerrisPad    FerrisPad-linux    13.9 MB  github.com
+  ai.storyteller.soundcraft  soundcraft.tar.gz  16.5 MB  github.com
+                             3 files            41.6 MB
+
+  ✓ audionaut.deb      11.2 MB in 9.8s, 1.2 MB/s
+    soundcraft.tar.gz  ███████████▏      74%  12.3 / 16.5 MB    1.2 MB/s  00:03
+    FerrisPad-linux    █▌                10%   1.5 / 13.9 MB    3.0 MB/s  00:04
+    Total 1/3          █████████         60%  25.0 / 41.6 MB    2.6 MB/s  00:06
+```
+
+Lines are cut to the width of the terminal (names in the middle, and
+narrow terminals get fewer columns), so that nothing wraps. Colours are
+used only on a terminal and not with `NO_COLOR` set; with `TERM=dumb` (or
+no `TERM`) there are neither colours nor redrawing. Then, as when stderr is
+not a terminal, every event gets a time-stamped line, and the progress one
+every 10 seconds:
+
+```
+rpak: prefetching 3 extra-data file(s):
+
+  ID                         File                  Size  Host
+  ...
+
 rpak: 13:48:55.881 start soundcraft.tar.gz (github.com)
 rpak: 13:48:55.881 start audionaut.deb (github.com)
-rpak: 13:49:05.607 done audionaut.deb, 10.7 MiB in 9.7s
+rpak: 13:49:05.607 done audionaut.deb, 11.2 MB in 9.7s, 1.2 MB/s
 rpak: 13:49:05.607 start FerrisPad-linux (github.com)
-rpak: 13:49:06.194 done soundcraft.tar.gz, 15.7 MiB in 10.3s
-rpak: 13:49:10.060 done FerrisPad-linux, 13.3 MiB in 4.5s
-rpak: prefetch done: 3 ready (3 downloaded, 0 reused), 0 skipped/failed, 14.2s
+rpak: 13:49:05.881 progress: 1/3 files, 23.6 / 41.6 MB (56%), 2.4 MB/s, 2 active
+rpak: 13:49:06.194 done soundcraft.tar.gz, 16.5 MB in 10.3s, 1.6 MB/s
+rpak: 13:49:10.060 done FerrisPad-linux, 13.9 MB in 4.5s, 3.1 MB/s
+rpak: prefetch done: 3 ready (3 downloaded, 0 reused), 0 skipped/failed, 41.6 MB in 14.2s
+
 ... flatpak's own output follows
 ```
 
