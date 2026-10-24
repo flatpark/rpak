@@ -30,6 +30,8 @@ Commands:
   update     prefetch, then run "flatpak update ARGS..."
   install    prefetch, then run "flatpak install ARGS..."
   clean      free the space flatpak leaves behind (see "rpak clean --help")
+  completion print the completion script for bash, zsh or fish
+             (see "rpak completion --help" for how to install it)
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
 
 After a successful install or update, rpak removes the copies of the
@@ -117,6 +119,8 @@ func run(version string, argv []string) int {
 	case "update", "install":
 	case "clean":
 		return cleanCommand(append(argv[:i:i], argv[i+1:]...), os.Stdout, os.Stderr)
+	case "completion":
+		return completionCommand(argv[i+1:], os.Stdout, os.Stderr)
 	default:
 		return passthrough(argv)
 	}
