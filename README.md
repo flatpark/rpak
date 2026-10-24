@@ -332,3 +332,43 @@ How it works, and why it is safe:
   that same commit fails, a normal install or update downloads the
   installers again.
 - `rpak clean` does not remove `-origin` remotes of uninstalled bundles.
+
+## Development
+
+```sh
+make lint test build   # go vet, gofmt, unit tests, ./rpak
+make e2e               # end-to-end test, needs podman and network access
+```
+
+`make e2e` runs `test/e2e/in-container.sh` against the stock flatpak of
+Debian trixie in a container (`--privileged`, for bubblewrap). It installs
+FlatPark extra-data apps with plain flatpak and with rpak, publishes a local
+app to test `rpak update`, and checks `rpak clean`. The log is in
+`test/e2e/out/e2e.log`.
+
+Two things are cached between runs:
+
+- the image built from `test/e2e/Containerfile`, tagged
+  `localhost/rpak-e2e:<hash>` with a hash of that file and the base image
+  (`RPAK_E2E_IMAGE`, default `debian:trixie`); changing either builds a new
+  one;
+- the podman volume `rpak-e2e-runtime`, mounted as the system installation
+  (`/var/lib/flatpak`). It holds only the runtime of the test apps,
+  downloaded on the first run (a few hundred MB) and checked for updates on
+  every run after that; a failed update is a warning. The test mounts it
+  read-only and checks that it did not change.
+
+The apps go `--user` into a fresh directory in the container and are
+discarded with it, and their extra-data are downloaded on every run, so
+that the downloads really run in parallel. With the cache in place, a run
+takes a minute or two.
+
+```sh
+E2E_FRESH=1 make e2e   # build the image and install the runtime from scratch,
+                       # in a throwaway image and volume
+make e2e-clean         # remove the cached image(s) and the volume
+```
+
+Runs can go side by side. A lock in `$XDG_RUNTIME_DIR` (or `/tmp`) makes
+building the image and updating the runtime wait while another run is
+testing, and `make e2e-clean` wait until no run is using the cache.
