@@ -49,7 +49,9 @@ func TestMain(m *testing.M) {
 // update/install it records its argv (NUL-separated), checks that the files
 // listed in $FAKE_DIR/expect are in place with the right checksum, and then
 // behaves as $FAKE_DIR/mode says. As complete it records its argv, prints
-// $FAKE_DIR/complete-out and exits with $FAKE_DIR/complete-exit.
+// $FAKE_DIR/complete-out and exits with $FAKE_DIR/complete-exit. As
+// permission-reset it appends its arguments to $FAKE_DIR/permission-reset,
+// a line per call, and fails if $FAKE_DIR/permission-reset-fail exists.
 const fakeFlatpak = `#!/bin/sh
 d="$FAKE_DIR"
 echo "$*" >> "$d/calls"
@@ -90,6 +92,10 @@ complete)
 	printf '%s\0' "$@" > "$d/complete-argv"
 	cat "$d/complete-out" 2>/dev/null
 	exit "$(cat "$d/complete-exit" 2>/dev/null || echo 0)" ;;
+permission-reset)
+	echo "$*" >> "$d/permission-reset"
+	[ -f "$d/permission-reset-fail" ] && { echo "error: no session bus" >&2; exit 1; }
+	exit 0 ;;
 uninstall|list|clean|--version)
 	printf '%s\0' "$@" > "$d/argv"
 	echo "fake flatpak $cmd"

@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -14,7 +16,8 @@ import (
 	"github.com/flatpark/rpak/internal/prefetch"
 )
 
-const cleanUsage = `Usage: rpak clean [--user | --system | --installation=NAME]... [--dry-run] [-v]
+const cleanUsage = `Usage: rpak clean [--user | --system | --installation=NAME]... [--dry-run]
+                  [--delete-data] [-v]
 
 Frees the space stock flatpak leaves behind:
 
@@ -30,7 +33,9 @@ Frees the space stock flatpak leaves behind:
     that no running app uses
 
 The data of apps that are no longer installed anywhere (~/.var/app/ID and
-overrides) is listed with the user installation, but never deleted.
+overrides) is listed with the user installation. It is only deleted with
+--delete-data, which also resets the apps' portal permissions ("flatpak
+permission-reset ID"); not under sudo.
 
 By default the default system installation, the user installation and
 every other configured installation are looked at. System installations
@@ -43,6 +48,8 @@ Options:
   --system                 the default system installation
   --installation=NAME      the system installation NAME
   --dry-run                only show what would be freed; changes nothing
+  --delete-data            also delete the data of apps that are no longer
+                           installed
   -v, --verbose            also show what is kept, and why
   -h, --help               show this help
 `
@@ -50,6 +57,7 @@ Options:
 type cleanOptions struct {
 	installations []string
 	dryRun        bool
+	deleteData    bool
 	verbose       bool
 }
 
@@ -70,6 +78,8 @@ func parseCleanArgs(argv []string) (opts cleanOptions, help bool, usageErr strin
 			opts.installations = append(opts.installations, arg)
 		case arg == "--dry-run":
 			opts.dryRun = true
+		case arg == "--delete-data":
+			opts.deleteData = true
 		case arg == "--verbose":
 			opts.verbose = true
 		case arg == "--ostree-verbose":
@@ -97,11 +107,14 @@ func parseCleanArgs(argv []string) (opts cleanOptions, help bool, usageErr strin
 	return opts, false, ""
 }
 
+// geteuid is os.Geteuid, replaceable in tests.
+var geteuid = os.Geteuid
+
 // underSudo is running_under_sudo_root(), for rpak: root, run by sudo as
 // rpak (or flatpak).
 func underSudo() bool {
 	command, ok := os.LookupEnv("SUDO_COMMAND")
-	if !ok || os.Geteuid() != 0 {
+	if !ok || geteuid() != 0 {
 		return false
 	}
 	first, _, _ := strings.Cut(command, " ")
@@ -245,7 +258,13 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 
 	for _, inst := range insts {
 		if inst.User {
-			listAppData(stdout, inst.Path)
+			c := &clean.Cleaner{DryRun: opts.dryRun, Item: item, Warn: warn}
+			appData(c, inst.Path, opts.deleteData, stdout, warn)
+			objects += c.Objects
+			freed += c.Freed
+			if c.Failed > 0 {
+				code = 1
+			}
 			break
 		}
 	}
@@ -258,10 +277,12 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 	return code
 }
 
-// listAppData lists what clean_app_data() of the fork's flatpak clean lists
-// without --delete-data. rpak has no --delete-data: it never deletes the
-// user's data.
-func listAppData(stdout io.Writer, userBase string) {
+// appData is clean_app_data() of the fork's flatpak clean: it lists the
+// data of apps that are no longer installed, and with deleteData deletes it
+// and resets the apps' permissions, counting each app as an object. Under
+// sudo it never deletes: the home directory may be root's or the user's,
+// and neither is what "sudo rpak clean" is for.
+func appData(c *clean.Cleaner, userBase string, deleteData bool, stdout io.Writer, warn func(string, ...any)) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
@@ -274,6 +295,10 @@ func listAppData(stdout io.Writer, userBase string) {
 	if len(apps) == 0 {
 		return
 	}
+	if deleteData && underSudo() {
+		warn("not deleting the data of apps under sudo; run \"rpak clean --delete-data\" without sudo")
+		deleteData = false
+	}
 	fmt.Fprintln(stdout, "Data of apps that are no longer installed:")
 	var total int64
 	for _, a := range apps {
@@ -284,10 +309,47 @@ func listAppData(stdout io.Writer, userBase string) {
 		if a.Override {
 			what += "  overrides"
 		}
-		fmt.Fprintf(stdout, "%s  %s\n", mb(a.Size), what)
 		total += a.Size
+		if !deleteData {
+			fmt.Fprintf(stdout, "%s  %s\n", mb(a.Size), what)
+			continue
+		}
+		if !c.DryRun {
+			if err := clean.RemoveAppData(home, userBase, paths, a); err != nil {
+				c.Failed++
+				warn("%v", err)
+				continue
+			}
+			if err := resetPermissions(a.ID); err != nil {
+				warn("cannot reset the permissions of %s: %v", a.ID, err)
+			}
+		}
+		c.Objects++
+		c.Freed += a.Size
+		c.Item(a.Size, what)
 	}
-	fmt.Fprintf(stdout, "Kept %s; rpak does not delete app data\n", formatSize(total))
+	if !deleteData {
+		fmt.Fprintf(stdout, "Kept %s; run \"rpak clean --delete-data\" to delete it\n", formatSize(total))
+	}
+}
+
+// resetPermissions is reset_permissions_for_app(), which the fork calls in
+// process: "flatpak permission-reset ID" removes the app from every table
+// of the portal permission store. It does not care whether the app is
+// installed, in any flatpak since 1.0.
+func resetPermissions(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, flatpakPath(), "permission-reset", "--", id)
+	cmd.Args[0] = "flatpak"
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("%v: %s", err, msg)
+		}
+		return err
+	}
+	return nil
 }
 
 // cleanRepo is clean_repo(): checks that the repository may be changed,

@@ -220,6 +220,7 @@ func TestCleanDryRunChangesNothing(t *testing.T) {
 			"0.1 MB  org.example.Gone  ~/.var/app  overrides\n" +
 			"0.0 MB  org.example.OnlyOverride  overrides\n" +
 			"Kept ",
+		"; run \"rpak clean --delete-data\" to delete it\n",
 		"Would free: 11 objects, ",
 	} {
 		if !strings.Contains(stdout, want) {
@@ -280,6 +281,9 @@ func TestClean(t *testing.T) {
 		!strings.Contains(stdout, "org.example.Gone  ~/.var/app  overrides\n") || strings.Contains(stdout, "org.example.App ") {
 		t.Errorf("output:\n%s", stdout)
 	}
+	if e.read("calls") != "" {
+		t.Errorf("flatpak was run: %s", e.read("calls"))
+	}
 	// The locks are released, repo-lock removed as glnx does.
 	if _, err := os.Stat(filepath.Join(e.base, "repo-lock")); err == nil {
 		t.Error("repo-lock left behind")
@@ -289,6 +293,180 @@ func TestClean(t *testing.T) {
 	code, stdout, _ = e.runOut("clean", "-u")
 	if code != 0 || !strings.Contains(stdout, "Freed: 0 objects, 0.00 GB") {
 		t.Errorf("second run: exit %d\n%s", code, stdout)
+	}
+}
+
+// linkedAppData adds the data of an uninstalled app that is a symlink, and
+// a symlink in the data of org.example.Gone (see appData), both to
+// directories outside, and an override that is a symlink to a file
+// outside. It returns what is outside, which must all stay.
+func linkedAppData(t *testing.T, e *env) []string {
+	t.Helper()
+	outside := t.TempDir()
+	dir, file := filepath.Join(outside, "dir", "keep"), filepath.Join(outside, "file")
+	put(t, dir, []byte("keep"))
+	put(t, file, []byte("keep"))
+	os.Symlink(filepath.Dir(dir), filepath.Join(e.home, ".var", "app", "org.example.Linked"))
+	os.Symlink(filepath.Dir(dir), filepath.Join(e.home, ".var", "app", "org.example.Gone", "escape"))
+	os.Symlink(file, filepath.Join(e.base, "overrides", "org.example.Linked"))
+	return []string{filepath.Dir(dir), dir, file}
+}
+
+func TestCleanDeleteData(t *testing.T) {
+	e := newEnv(t)
+	e.home = t.TempDir()
+	installation(t, e.base)
+	leftovers(t, e.base, true)
+	data := appData(t, e)
+	outside := linkedAppData(t, e)
+	gone := []string{
+		filepath.Join(e.home, ".var", "app", "org.example.Gone"),
+		filepath.Join(e.base, "overrides", "org.example.Gone"),
+		filepath.Join(e.base, "overrides", "org.example.OnlyOverride"),
+		filepath.Join(e.home, ".var", "app", "org.example.Linked"),
+		filepath.Join(e.base, "overrides", "org.example.Linked"),
+	}
+	// The installed app's data stays, and so do the directories.
+	kept := append([]string{data[1], filepath.Join(e.home, ".var", "app"), filepath.Join(e.base, "overrides")}, outside...)
+
+	code, stdout, stderr := e.runOut("clean", "--user", "--delete-data")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	for _, p := range gone {
+		if _, err := os.Lstat(p); err == nil {
+			t.Errorf("%s still there", p)
+		}
+	}
+	for _, p := range kept {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s removed", p)
+		}
+	}
+	if got, want := e.read("permission-reset"), "permission-reset -- org.example.Gone\npermission-reset -- org.example.Linked\npermission-reset -- org.example.OnlyOverride\n"; got != want {
+		t.Errorf("permission-reset calls:\n%s\nwant\n%s", got, want)
+	}
+	// Each app is an object: 6 in the repository and extra-data, 3 apps.
+	for _, want := range []string{
+		"Data of apps that are no longer installed:\n" +
+			"0.1 MB  org.example.Gone  ~/.var/app  overrides\n" +
+			"0.0 MB  org.example.Linked  ~/.var/app  overrides\n" +
+			"0.0 MB  org.example.OnlyOverride  overrides\n" +
+			"Freed: 9 objects, ",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output lacks %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "Kept") || strings.Contains(stdout, "org.example.App ") {
+		t.Errorf("output:\n%s", stdout)
+	}
+
+	// Nothing left: nothing listed, no permission-reset.
+	os.Remove(filepath.Join(e.fake, "permission-reset"))
+	code, stdout, _ = e.runOut("clean", "--delete-data")
+	if code != 0 || strings.Contains(stdout, "Data of apps") || e.read("permission-reset") != "" {
+		t.Errorf("second run: exit %d\n%s", code, stdout)
+	}
+}
+
+func TestCleanDryRunDeleteData(t *testing.T) {
+	e := newEnv(t)
+	e.home = t.TempDir()
+	appData(t, e)
+	linkedAppData(t, e)
+	before := snapshot(t, e.base) + snapshot(t, e.home)
+	code, stdout, stderr := e.runOut("clean", "--dry-run", "--delete-data")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	if after := snapshot(t, e.base) + snapshot(t, e.home); after != before {
+		t.Errorf("dry run changed files:\nbefore\n%s\nafter\n%s", before, after)
+	}
+	if e.read("calls") != "" {
+		t.Errorf("flatpak was run: %s", e.read("calls"))
+	}
+	// Counted as it would be deleted; no "Kept" line.
+	if !strings.Contains(stdout, "0.1 MB  org.example.Gone  ~/.var/app  overrides\n") ||
+		!strings.Contains(stdout, "Would free: 3 objects, ") || strings.Contains(stdout, "Kept") {
+		t.Errorf("output:\n%s", stdout)
+	}
+}
+
+func TestCleanDeleteDataPermissionResetFails(t *testing.T) {
+	e := newEnv(t)
+	e.home = t.TempDir()
+	data := appData(t, e)
+	e.write("permission-reset-fail", "")
+	code, stdout, stderr := e.runOut("clean", "--delete-data")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	for _, id := range []string{"org.example.Gone", "org.example.OnlyOverride"} {
+		if want := "rpak: warning: cannot reset the permissions of " + id + ": exit status 1: error: no session bus\n"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	// The data is deleted all the same and counted.
+	if _, err := os.Lstat(data[0]); err == nil {
+		t.Error("data not deleted")
+	}
+	if !strings.Contains(stdout, "Freed: 2 objects, ") {
+		t.Errorf("output:\n%s", stdout)
+	}
+}
+
+func TestCleanDeleteDataFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	e := newEnv(t)
+	e.home = t.TempDir()
+	data := appData(t, e)
+	ro := filepath.Dir(data[0])
+	os.Chmod(ro, 0o555)
+	t.Cleanup(func() { os.Chmod(ro, 0o755) })
+	code, stdout, stderr := e.runOut("clean", "--delete-data")
+	if code != 1 || !strings.Contains(stderr, "permission denied") {
+		t.Errorf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	// The app whose data could not be deleted keeps its override and
+	// permissions, is not counted; the next one is deleted.
+	if _, err := os.Lstat(data[2]); err != nil {
+		t.Error("override deleted although the data could not be")
+	}
+	if _, err := os.Lstat(data[3]); err == nil {
+		t.Error("the next app was not deleted")
+	}
+	if got := e.read("permission-reset"); got != "permission-reset -- org.example.OnlyOverride\n" {
+		t.Errorf("permission-reset calls: %q", got)
+	}
+	if strings.Contains(stdout, "org.example.Gone") || !strings.Contains(stdout, "Freed: 1 objects, ") {
+		t.Errorf("output:\n%s", stdout)
+	}
+}
+
+// TestCleanDeleteDataOnlyWithUser: as in the fork, the data of apps is only
+// looked at when the user installation is cleaned.
+func TestCleanDeleteDataOnlyWithUser(t *testing.T) {
+	e := newEnv(t)
+	e.home = t.TempDir()
+	installation(t, e.sys)
+	appData(t, e)
+	extra := t.TempDir()
+	put(t, filepath.Join(e.conf, "installations.d", "extra.conf"), []byte(fmt.Sprintf("[Installation \"extra\"]\nPath=%s\n", extra)))
+	before := snapshot(t, e.base) + snapshot(t, e.home)
+	for _, argv := range [][]string{{"--system"}, {"--installation=extra"}, {"--system", "--installation", "extra"}} {
+		code, stdout, stderr := e.runOut(append([]string{"clean", "--delete-data"}, argv...)...)
+		if code != 0 || strings.Contains(stdout, "Data of apps") {
+			t.Errorf("%q: exit %d\n%s%s", argv, code, stdout, stderr)
+		}
+	}
+	if after := snapshot(t, e.base) + snapshot(t, e.home); after != before {
+		t.Error("app data changed")
+	}
+	if e.read("calls") != "" {
+		t.Errorf("flatpak was run: %s", e.read("calls"))
 	}
 }
 
@@ -378,7 +556,7 @@ func TestCleanUsage(t *testing.T) {
 	}{
 		{[]string{"clean", "--help"}, 0, "Usage: rpak clean"},
 		{[]string{"-v", "clean", "-h"}, 0, "Usage: rpak clean"},
-		{[]string{"clean", "--delete-data"}, 2, "unknown option --delete-data"},
+		{[]string{"clean", "--delete"}, 2, "unknown option --delete"},
 		{[]string{"clean", "-x"}, 2, "unknown option -x"},
 		{[]string{"clean", "org.example.App"}, 2, "too many arguments"},
 	} {
