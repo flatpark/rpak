@@ -4,7 +4,7 @@ GOFMT   ?= mise x -- gofmt
 LDFLAGS := -s -w -X main.version=$(VERSION)
 BUILD   := CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)'
 
-.PHONY: all build test lint dist build-amd64 build-arm64 e2e clean
+.PHONY: all build test lint dist build-amd64 build-arm64 e2e e2e-clean clean
 
 all: lint test build
 
@@ -28,9 +28,13 @@ build-arm64:
 dist: build-amd64 build-arm64
 
 # End-to-end test with the distribution's flatpak in a debian:trixie
-# container (podman); downloads several hundred MB.
+# container (podman). The image and the runtime are cached (several hundred
+# MB the first time); E2E_FRESH=1 starts from scratch, e2e-clean removes them.
 e2e: build
 	./test/e2e/run.sh
+
+e2e-clean:
+	./test/e2e/run.sh --clean
 
 clean:
 	rm -rf rpak dist

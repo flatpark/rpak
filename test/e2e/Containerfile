@@ -1,0 +1,10 @@
+# The image the end-to-end test runs in, see run.sh: the distribution's
+# flatpak, without patches. run.sh tags it with a hash of this file and of
+# BASE, and builds it only when that tag is missing.
+ARG BASE=docker.io/library/debian:trixie
+FROM $BASE
+# ostree and python3 only for the checks: ostree show, and holding locks.
+RUN apt-get update -qq && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+		flatpak ca-certificates ostree python3 >/dev/null && \
+	rm -rf /var/lib/apt/lists/*

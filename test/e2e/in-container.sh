@@ -1,6 +1,9 @@
 #!/bin/bash
-# Runs inside debian:trixie, see run.sh. Exits non-zero if a check fails.
+# Runs inside the e2e image, see run.sh. Exits non-zero if a check fails.
+# /var/lib/flatpak is the runtime volume, read-only: a system installation
+# with only the runtime, which the --user installs below depend on.
 set -euo pipefail
+. /e2e/env.sh
 
 step() { printf '\n=== %s\n' "$*"; }
 fail() { echo "E2E FAILED: $*"; exit 1; }
@@ -11,11 +14,7 @@ pass() { echo "ok: $*"; }
 PLAIN=app.audionaut.Audionaut
 APPS=(com.ferrispad.FerrisPad ai.storyteller.soundcraft)
 
-step "install the distribution's flatpak"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-# ostree and python3 only for the checks: ostree show, and holding locks.
-apt-get install -y -qq --no-install-recommends flatpak ca-certificates ostree python3 >/dev/null
+step "the distribution's flatpak"
 dpkg-query -W -f='debian package: ${Package} ${Version}\n' flatpak ostree
 flatpak --version
 rpak --version
@@ -31,7 +30,7 @@ arch=$(flatpak --default-arch)
 commitmeta() { local c; c=$(flatpak info --user --show-commit "$1"); echo "$repo/objects/${c:0:2}/${c:2}.commitmeta"; }
 keys() { ostree --repo="$repo" show --list-detached-metadata-keys "$1"; }
 # Lists every file below the installation with size, mtime and mode.
-state() { find "$FLATPAK_USER_DIR" -printf '%p %y %s %T@ %m\n' | sort; }
+state() { find "${1:-$FLATPAK_USER_DIR}" -printf '%p %y %s %T@ %m\n' | sort; }
 # Holds a shared OFD lock on $1, as a flatpak pull does, until killed.
 hold_lock() {
 	rm -f /tmp/lock-ready
@@ -48,7 +47,7 @@ PY
 }
 
 step "remotes"
-flatpak remote-add --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+# No flathub: the runtime has to come from the system installation.
 flatpak remote-add --user flatpark https://dl.flatpark.org/flatpark.flatpakrepo
 flatpak remotes --user
 
@@ -58,13 +57,16 @@ for app in "$PLAIN" "${APPS[@]}"; do
 	flatpak remote-info --user --show-metadata flatpark "$app" | sed -n '/^\[Extra Data\]/,/^$/p;/^runtime=/p'
 done
 
-step "runtime (plain flatpak, so that the logs below are about the apps)"
-# --no-related: the GL/codecs extensions are ~2 GB and not needed here.
-flatpak install --user -y --noninteractive --no-related flathub "org.freedesktop.Platform/$arch/26.08" >/dev/null
-flatpak list --user --runtime --columns=ref
+step "runtime: system installation (run.sh keeps it in a volume)"
+flatpak list --system --columns=ref,active
+flatpak info --system "$RUNTIME/$arch/$RUNTIME_BRANCH" >/dev/null || fail "no $RUNTIME in the system installation"
+state /var/lib/flatpak > /tmp/system.before
 
 step "clean: $PLAIN installed with plain flatpak"
 flatpak install --user -y --noninteractive flatpark "$PLAIN" >/dev/null
+flatpak info --user "$PLAIN" >/dev/null || fail "$PLAIN is not installed"
+[ -z "$(flatpak list --user --runtime --columns=ref)" ] || fail "runtimes in the user installation: $(flatpak list --user --runtime --columns=ref)"
+pass "$PLAIN installed --user with the runtime of the system installation"
 commit=$(flatpak info --user --show-commit "$PLAIN")
 meta=$(commitmeta "$PLAIN")
 before=$(stat -c %s "$meta")
@@ -239,7 +241,7 @@ make_app() { # dir, then [Extra Data] lines
 	printf '#!/bin/sh\nsha256sum * > SHA256SUMS\n' > "$dir/files/bin/apply_extra"
 	chmod +x "$dir/files/bin/apply_extra"
 	{
-		printf '[Application]\nname=org.rpak.E2E\nruntime=org.freedesktop.Platform/%s/26.08\ncommand=apply_extra\n\n[Extra Data]\n' "$arch"
+		printf '[Application]\nname=org.rpak.E2E\nruntime=%s/%s/%s\ncommand=apply_extra\n\n[Extra Data]\n' "$RUNTIME" "$arch" "$RUNTIME_BRANCH"
 		printf '%s\n' "$@"
 	} > "$dir/metadata"
 }
@@ -301,5 +303,7 @@ rpak clean --user --dry-run | tail -1
 leftover=$(find "$repo/objects" -name '*.commitmeta' -size +100k)
 [ -z "$leftover" ] || fail "big commitmeta left: $leftover"
 pass "no commitmeta over 100 KiB left in the repository"
+state /var/lib/flatpak | diff /tmp/system.before - || fail "the system installation changed"
+pass "the system installation with the runtime is unchanged"
 
 step "E2E PASSED"
