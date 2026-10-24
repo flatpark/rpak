@@ -65,7 +65,7 @@ func parseSource(values map[string]string, suffix string) (Source, error) {
 	}
 
 	checksum := values["checksum"+suffix]
-	if !validChecksum(checksum) {
+	if !ValidChecksum(checksum) {
 		return Source{}, fmt.Errorf("invalid checksum %q", checksum)
 	}
 
@@ -108,13 +108,32 @@ func basename(u *url.URL) (string, error) {
 	return name, nil
 }
 
-// extraDataGroup reads the [Extra Data] group with GKeyFile semantics: the
-// last occurrence of a key wins, groups may repeat, values are unescaped.
-// Keys are returned in first-seen order.
+// extraDataGroup reads the [Extra Data] group, see KeyFile. Keys are
+// returned in first-seen order.
 func extraDataGroup(text string) (map[string]string, []string) {
-	values := make(map[string]string)
-	var order []string
-	inGroup := false
+	for _, g := range KeyFile(text) {
+		if g.Name == "Extra Data" {
+			return g.Values, g.Keys
+		}
+	}
+	return map[string]string{}, nil
+}
+
+// Group is a group of a key file.
+type Group struct {
+	Name   string
+	Values map[string]string
+	Keys   []string // in first-seen order
+}
+
+// KeyFile reads text with GKeyFile semantics: the last occurrence of a key
+// wins, a group that appears again continues the first one, values are
+// unescaped as g_key_file_get_string() does. Groups are returned in
+// first-seen order.
+func KeyFile(text string) []Group {
+	var groups []*Group
+	byName := make(map[string]*Group)
+	var current *Group
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -123,11 +142,20 @@ func extraDataGroup(text string) (map[string]string, []string) {
 			continue
 		}
 		if line[0] == '[' {
+			current = nil
 			end := strings.IndexByte(line, ']')
-			inGroup = end > 0 && line[1:end] == "Extra Data"
+			if end <= 0 {
+				continue
+			}
+			name := line[1:end]
+			if current = byName[name]; current == nil {
+				current = &Group{Name: name, Values: make(map[string]string)}
+				byName[name] = current
+				groups = append(groups, current)
+			}
 			continue
 		}
-		if !inGroup {
+		if current == nil {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
@@ -135,12 +163,16 @@ func extraDataGroup(text string) (map[string]string, []string) {
 			continue
 		}
 		key = strings.TrimRight(key, " \t")
-		if _, seen := values[key]; !seen {
-			order = append(order, key)
+		if _, seen := current.Values[key]; !seen {
+			current.Keys = append(current.Keys, key)
 		}
-		values[key] = unescape(strings.TrimLeft(value, " \t"))
+		current.Values[key] = unescape(strings.TrimLeft(value, " \t"))
 	}
-	return values, order
+	out := make([]Group, len(groups))
+	for i, g := range groups {
+		out[i] = *g
+	}
+	return out
 }
 
 // unescape handles the escapes g_key_file_get_string() understands.
@@ -171,8 +203,8 @@ func unescape(value string) string {
 	return b.String()
 }
 
-// validChecksum matches ostree_validate_checksum_string(): 64 lowercase hex.
-func validChecksum(value string) bool {
+// ValidChecksum matches ostree_validate_checksum_string(): 64 lowercase hex.
+func ValidChecksum(value string) bool {
 	if len(value) != 64 {
 		return false
 	}
