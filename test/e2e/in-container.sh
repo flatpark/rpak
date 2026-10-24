@@ -134,6 +134,10 @@ mkdir -p "$extra/$(hex 4)" && echo mine > "$extra/$(hex 4)/app.deb"
 mkdir -p "$extra/$(hex 5)" && touch "$extra/$(hex 5)/.flatpak-prefetch" && echo fork > "$extra/$(hex 5)/app.deb.part"
 notmp="$branch/.not-a-checkout"
 mkdir -p "$notmp"
+# user data of an app that is gone (listed, kept) and of one installed
+mkdir -p "$HOME/.var/app/org.rpak.Gone" && head -c 300000 /dev/urandom > "$HOME/.var/app/org.rpak.Gone/data"
+mkdir -p "$FLATPAK_USER_DIR/overrides" && printf '[Context]\nshared=network;\n' > "$FLATPAK_USER_DIR/overrides/org.rpak.Gone"
+mkdir -p "$HOME/.var/app/$PLAIN" && echo mine > "$HOME/.var/app/$PLAIN/rpak-test"
 rpak clean --user | tee /tmp/clean.log
 for gone in "$tmpdir" "$partial" "$repo/refs/remotes/deleted-remote" "$FLATPAK_USER_DIR/app/org.rpak.Gone" "$marked"; do
 	[ ! -e "$gone" ] || fail "$gone is still there"
@@ -144,6 +148,13 @@ for kept in "$extra/$(hex 4)/app.deb" "$extra/$(hex 5)/.flatpak-prefetch" "$extr
 	[ -e "$kept" ] || fail "$kept was removed"
 done
 pass "kept: unmarked extra-data dir, flatpak's .flatpak-prefetch dir, other dot dirs, the deployment, live refs"
+grep -qx "0.3 MB  org.rpak.Gone  ~/.var/app  overrides" /tmp/clean.log || fail "data of org.rpak.Gone not listed"
+! grep -q "^[0-9.]* MB  $PLAIN" /tmp/clean.log || fail "data of the installed $PLAIN listed"
+for kept in "$HOME/.var/app/org.rpak.Gone/data" "$FLATPAK_USER_DIR/overrides/org.rpak.Gone" "$HOME/.var/app/$PLAIN/rpak-test"; do
+	[ -e "$kept" ] || fail "$kept was removed"
+done
+pass "the data of the uninstalled app is listed and kept, that of the installed one is not listed"
+rm -rf "$HOME/.var/app/org.rpak.Gone" "$FLATPAK_USER_DIR/overrides/org.rpak.Gone"
 rm -rf "$extra" "$notmp"
 flatpak run --user --command=true "$PLAIN" || fail "flatpak run failed after cleaning leftovers"
 
