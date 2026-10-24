@@ -127,7 +127,7 @@ func TestDownload(t *testing.T) {
 	s := srv.add("/pool/app.deb", content)
 	var progress atomic.Int64
 	cfg := testConfig(t, base)
-	cfg.OnProgress = func(n int64) { progress.Add(n) }
+	cfg.OnProgress = func(_ metadata.Source, n int64) { progress.Add(n) }
 	summary, results := run(t, cfg, s)
 
 	if summary.Downloaded != 1 || results["app.deb"].Status != Downloaded {
@@ -216,7 +216,7 @@ func TestResumeWithRange(t *testing.T) {
 	}
 	var progress atomic.Int64
 	cfg := testConfig(t, base)
-	cfg.OnProgress = func(n int64) { progress.Add(n) }
+	cfg.OnProgress = func(_ metadata.Source, n int64) { progress.Add(n) }
 	summary, _ := run(t, cfg, s)
 
 	if summary.Downloaded != 1 || srv.ranges.Load() != 1 {

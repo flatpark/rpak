@@ -41,19 +41,19 @@ type Config struct {
 
 	// Callbacks, called concurrently from download goroutines.
 	OnStart    func(metadata.Source)
-	OnProgress func(bytes int64)
+	OnProgress func(s metadata.Source, bytes int64)
 	OnDone     func(metadata.Source, Result)
 }
 
 // NewConfig returns the default configuration: 4 downloads at a time, at
-// most 2 per host, 30s to connect and to get response headers, 60s without
+// most 4 per host (like the patched flatpak), 30s to connect and to get response headers, 60s without
 // data counts as a failure, 2 retries with exponential backoff.
 func NewConfig(baseDir, version string) Config {
 	return Config{
 		BaseDir:     baseDir,
 		Version:     version,
 		Jobs:        4,
-		PerHost:     2,
+		PerHost:     4,
 		Client:      NewHTTPClient(),
 		IdleTimeout: 60 * time.Second,
 		Retries:     2,
@@ -428,7 +428,7 @@ func (d *Downloader) attempt(ctx context.Context, s metadata.Source, part string
 			}
 			offset += int64(n)
 			if d.cfg.OnProgress != nil {
-				d.cfg.OnProgress(int64(n))
+				d.cfg.OnProgress(s, int64(n))
 			}
 		}
 		if rerr == io.EOF {

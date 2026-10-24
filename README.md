@@ -65,7 +65,7 @@ flatpak.
 | Command / variable | Effect |
 |---|---|
 | `rpak --version`, `rpak help` | version, usage |
-| `RPAK_JOBS=N` | concurrent downloads, 1–16, default 4 (at most 2 per host) |
+| `RPAK_JOBS=N` | concurrent downloads, 1–16, default 4 (at most 4 per host) |
 | `RPAK_DRY_RUN=1` | only print the prefetch plan and the flatpak command; no downloads, flatpak is not run |
 | `RPAK_FLATPAK=/path/to/flatpak` | flatpak executable to use (default: `flatpak` from `PATH`) |
 
