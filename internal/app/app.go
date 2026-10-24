@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/flatpark/rpak/internal/args"
-	"github.com/flatpark/rpak/internal/metadata"
 	"github.com/flatpark/rpak/internal/plan"
 	"github.com/flatpark/rpak/internal/prefetch"
 )
@@ -304,14 +302,10 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 	printPlan(os.Stderr, p.Sources, "")
 	cfg := prefetch.NewConfig(baseDir, version)
 	cfg.Jobs = jobs(warn)
-	start := time.Now()
 	summary := download(ctx, cfg, p.Sources)
 	if ctx.Err() != nil {
 		return prep
 	}
-	ok := summary.Downloaded + summary.Reused
-	fmt.Fprintf(os.Stderr, "rpak: prefetch done: %d ready (%d downloaded, %d reused), %d skipped/failed, %s\n",
-		ok, summary.Downloaded, summary.Reused, summary.Skipped+summary.Failed, time.Since(start).Round(100*time.Millisecond))
 	prep.dirs = summary.Dirs
 	return prep
 }
@@ -327,26 +321,6 @@ func jobs(warn func(string, ...any)) int {
 		return 4
 	}
 	return n
-}
-
-func printPlan(w io.Writer, sources []metadata.Source, baseDir string) {
-	if len(sources) == 0 {
-		if baseDir != "" {
-			fmt.Fprintln(w, "rpak: nothing to prefetch")
-		}
-		return
-	}
-	var total int64
-	for _, s := range sources {
-		total += s.Size
-	}
-	fmt.Fprintf(w, "rpak: prefetching %d extra-data file(s), %s:\n", len(sources), prefetch.FormatBytes(total))
-	for _, s := range sources {
-		fmt.Fprintf(w, "  %s  %s  %s  %s\n", s.Ref, s.Name, prefetch.FormatBytes(s.Size), host(s.URI))
-		if baseDir != "" {
-			fmt.Fprintf(w, "    -> %s\n", prefetch.ExtraDataDir(baseDir, s.Checksum))
-		}
-	}
 }
 
 // shellQuote formats argv so that it can be pasted into a shell.
