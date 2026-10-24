@@ -36,7 +36,8 @@ func TestMain(m *testing.M) {
 // fakeFlatpak answers queries from files in $FAKE_DIR. When run as
 // update/install it records its argv (NUL-separated), checks that the files
 // listed in $FAKE_DIR/expect are in place with the right checksum, and then
-// behaves as $FAKE_DIR/mode says.
+// behaves as $FAKE_DIR/mode says. As complete it records its argv, prints
+// $FAKE_DIR/complete-out and exits with $FAKE_DIR/complete-exit.
 const fakeFlatpak = `#!/bin/sh
 d="$FAKE_DIR"
 echo "$*" >> "$d/calls"
@@ -73,6 +74,10 @@ update|upgrade|install)
 		exit 99 ;;
 	esac
 	exit 0 ;;
+complete)
+	printf '%s\0' "$@" > "$d/complete-argv"
+	cat "$d/complete-out" 2>/dev/null
+	exit "$(cat "$d/complete-exit" 2>/dev/null || echo 0)" ;;
 uninstall|list|clean|--version)
 	printf '%s\0' "$@" > "$d/argv"
 	echo "fake flatpak $cmd"

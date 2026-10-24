@@ -103,6 +103,10 @@ func run(version string, argv []string) int {
 	case "--version":
 		fmt.Printf("rpak %s\n", version)
 		return passthrough(argv)
+	case "complete": // the shell completion protocol, as flatpak's main() takes it
+		if len(argv) >= 3 {
+			return completeCommand(argv[1:], os.Stdout)
+		}
 	}
 	// flatpak takes global options before the command ("flatpak -v install").
 	i := 0
