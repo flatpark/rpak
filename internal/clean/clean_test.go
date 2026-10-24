@@ -484,6 +484,88 @@ func TestUninstalledAppData(t *testing.T) {
 	}
 }
 
+func TestRemoveAppData(t *testing.T) {
+	home, user, system, outside := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	varApp := filepath.Join(home, ".var", "app")
+	overrides := filepath.Join(user, "overrides")
+	write(t, filepath.Join(varApp, "org.example.Gone", "data", "x"), []byte("x"), 0o644)
+	write(t, filepath.Join(overrides, "org.example.Gone"), []byte("[Context]\n"), 0o644)
+	// Symlinks are removed, never followed: at the top, below, and as the
+	// override.
+	write(t, filepath.Join(outside, "dir", "keep"), []byte("keep"), 0o644)
+	write(t, filepath.Join(outside, "file"), []byte("keep"), 0o644)
+	os.Symlink(filepath.Join(outside, "dir"), filepath.Join(varApp, "org.example.Gone", "escape"))
+	os.Symlink(filepath.Join(outside, "dir"), filepath.Join(varApp, "org.example.Linked"))
+	os.Symlink(filepath.Join(outside, "file"), filepath.Join(overrides, "org.example.Linked"))
+	os.Symlink("x86_64/stable", filepath.Join(mkdirp(t, system, "app", "org.example.Back"), "current"))
+	mkdir(t, filepath.Join(varApp, "org.example.Back"))
+	insts := []string{user, system}
+
+	for _, a := range []AppData{
+		{ID: "org.example.Gone", Data: true, Override: true},
+		{ID: "org.example.Linked", Data: true, Override: true},
+		// listed, then removed by someone else: not an error
+		{ID: "org.example.Vanished", Data: true, Override: true},
+	} {
+		if err := RemoveAppData(home, user, insts, a); err != nil {
+			t.Errorf("%s: %v", a.ID, err)
+		}
+	}
+	for _, p := range []string{
+		filepath.Join(varApp, "org.example.Gone"), filepath.Join(overrides, "org.example.Gone"),
+		filepath.Join(varApp, "org.example.Linked"), filepath.Join(overrides, "org.example.Linked"),
+	} {
+		if exists(p) {
+			t.Errorf("%s still there", p)
+		}
+	}
+	for _, p := range []string{filepath.Join(outside, "dir", "keep"), filepath.Join(outside, "file"), varApp, overrides} {
+		if !exists(p) {
+			t.Errorf("%s removed", p)
+		}
+	}
+
+	// Refused: installed since it was listed, and names that are not app
+	// IDs (which UninstalledAppData never returns).
+	for _, a := range []AppData{
+		{ID: "org.example.Back", Data: true},
+		{ID: "..", Data: true},
+		{ID: "", Data: true},
+		{ID: "org.example/../../x.y", Data: true},
+	} {
+		if err := RemoveAppData(home, user, insts, a); err == nil {
+			t.Errorf("%q: no error", a.ID)
+		}
+	}
+	if !exists(filepath.Join(varApp, "org.example.Back")) || !exists(home) {
+		t.Error("removed what was refused")
+	}
+
+	// What cannot be removed is an error, as for flatpak_rm_rf(), and the
+	// override stays.
+	if os.Geteuid() != 0 {
+		ro := filepath.Join(varApp, "org.example.ReadOnly", "ro")
+		write(t, filepath.Join(ro, "f"), nil, 0o644)
+		write(t, filepath.Join(overrides, "org.example.ReadOnly"), nil, 0o644)
+		os.Chmod(ro, 0o555)
+		t.Cleanup(func() { os.Chmod(ro, 0o755) })
+		if err := RemoveAppData(home, user, insts, AppData{ID: "org.example.ReadOnly", Data: true, Override: true}); err == nil {
+			t.Error("read-only directory: no error")
+		}
+		if !exists(filepath.Join(overrides, "org.example.ReadOnly")) {
+			t.Error("override removed although the data is still there")
+		}
+	}
+}
+
+func TestChildPath(t *testing.T) {
+	for name, ok := range map[string]bool{"a.b": true, ":1.42": true, "": false, ".": false, "..": false, "a/b": false, "../a": false} {
+		if _, err := childPath("/home/me/.var/app", name); (err == nil) != ok {
+			t.Errorf("%q: %v", name, err)
+		}
+	}
+}
+
 func TestDBusName(t *testing.T) {
 	for name, want := range map[string]bool{
 		"org.example.App": true, "org.example.App-1": true, "a.b": true, "_a.b_": true,

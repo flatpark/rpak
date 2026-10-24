@@ -7,7 +7,9 @@
 //     detached metadata of every commit it pulled (StripExtraData),
 //   - leftovers in the repository and of interrupted deploys
 //     (RepoLeftovers, InterruptedDeploys, Removed),
-//   - rpak's own prefetch directories (PrefetchDirs).
+//   - rpak's own prefetch directories (PrefetchDirs),
+//   - the data of apps that are no longer installed, which is the user's
+//     and only deleted on request (UninstalledAppData, RemoveAppData).
 //
 // Callers lock the installation first (Lock) unless DryRun is set.
 package clean
@@ -661,7 +663,7 @@ func diskUsage(path string) int64 {
 	return total
 }
 
-// --- data of apps that are no longer installed (listed, never deleted)
+// --- data of apps that are no longer installed
 
 // AppData is what an app that is no longer installed left for the user.
 type AppData struct {
@@ -678,8 +680,8 @@ type AppData struct {
 // that are D-Bus names and not the ID of an app installed in any of the
 // installations, sorted. An app counts as installed where
 // app/ID/current exists, as flatpak_find_current_ref() checks it in the
-// user and every system installation. rpak only lists these: the data is
-// the user's.
+// user and every system installation. Listing them changes nothing; see
+// RemoveAppData for --delete-data.
 func UninstalledAppData(home, userBase string, installations []string) []AppData {
 	varApp := filepath.Join(home, ".var", "app")
 	overrides := filepath.Join(userBase, "overrides")
@@ -708,6 +710,53 @@ func UninstalledAppData(home, userBase string, installations []string) []AppData
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// RemoveAppData deletes what UninstalledAppData found for one app, as
+// clean_app_data() of the fork does with --delete-data: ~/.var/app/ID like
+// flatpak_rm_rf() (if it is a symlink, only the link) and the override
+// like flatpak_remove_override_keyfile() (unlinked). Before that it checks
+// again that ID is a D-Bus name, so a single path component, and that the
+// app has not been installed since. Resetting its permissions is up to the
+// caller.
+func RemoveAppData(home, userBase string, installations []string, a AppData) error {
+	if !dbusName(a.ID) {
+		return fmt.Errorf("%q is not an app ID", a.ID)
+	}
+	if installed(a.ID, installations) {
+		return fmt.Errorf("%s is installed now, keeping its data", a.ID)
+	}
+	if a.Data {
+		path, err := childPath(filepath.Join(home, ".var", "app"), a.ID)
+		if err != nil {
+			return err
+		}
+		// os.RemoveAll unlinks path first and only descends into it
+		// through openat(O_NOFOLLOW), as glnx_shutil_rm_rf_at() does:
+		// no symlink, at the top or below, is followed.
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	if a.Override {
+		path, err := childPath(filepath.Join(userBase, "overrides"), a.ID)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// childPath is dir/name, for a name that cannot lead out of dir.
+func childPath(dir, name string) (string, error) {
+	path := filepath.Join(dir, name)
+	if name == "." || name == ".." || strings.ContainsRune(name, '/') || filepath.Dir(path) != filepath.Clean(dir) {
+		return "", fmt.Errorf("%q is not a name in %s", name, dir)
+	}
+	return path, nil
 }
 
 // installed is flatpak_find_current_ref() != NULL. flatpak also requires
