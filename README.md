@@ -109,9 +109,8 @@ rpak completion fish > ~/.config/fish/completions/rpak.fish
 The scripts are flatpak's, calling `rpak complete` instead of
 `flatpak complete` (same protocol). rpak completes what it implements
 itself: the command name, with `clean` added to flatpak's commands, and
-the options of `rpak clean`, which are not those of `flatpak clean` in
-FlatPark's fork (no `--delete-data`). For every other command, `install`
-and `update` included, rpak asks your flatpak and passes its answer on, so
+the options of `rpak clean`. For every other command, `install` and
+`update` included, rpak asks your flatpak and passes its answer on, so
 refs, remotes and options are completed exactly as for flatpak.
 
 With `alias flatpak=rpak`, zsh expands the alias before completing, so
@@ -195,7 +194,7 @@ installers in the repository.
 **`rpak clean`** does that for all installations, and removes leftovers:
 
 ```
-rpak clean [--user | --system | --installation=NAME]... [--dry-run] [-v]
+rpak clean [--user | --system | --installation=NAME]... [--dry-run] [--delete-data] [-v]
 ```
 
 - `xa.extra-data` in the detached metadata of every commit, deployed or not.
@@ -215,8 +214,17 @@ rpak clean [--user | --system | --installation=NAME]... [--dry-run] [-v]
   deployments in `.removed` that no running app holds a lock on, which is
   what flatpak itself does after most transactions.
 - The data of apps that are no longer installed in any installation
-  (`~/.var/app/ID` and per-user overrides) is **listed, never deleted**: it
-  is your data. rpak has no `--delete-data`.
+  (`~/.var/app/ID` and per-user overrides) is **only listed** unless you
+  add `--delete-data`: it is your data. With `--delete-data` rpak deletes
+  it and resets each app's portal permissions with
+  `flatpak permission-reset ID`, as the fork's `flatpak clean --delete-data`
+  does; if that fails (no session bus, say) it prints a warning and goes
+  on. A `~/.var/app/ID` that is a symlink loses the link, not what it
+  points to, and no symlink inside is followed. This only happens when the
+  user installation is cleaned (not with only `--system` or
+  `--installation=NAME`), and never under sudo: `sudo rpak clean
+  --delete-data` lists the data and leaves it alone, whichever home
+  directory sudo left in `$HOME`.
 
 Without options it looks at the default system installation, the user
 installation and every installation configured in
@@ -233,15 +241,17 @@ User installation:
 0.0 MB  /home/me/.local/share/flatpak/repo/refs: 4 empty directories
 Data of apps that are no longer installed:
 120.4 MB  com.example.Old  ~/.var/app  overrides
-Kept 126.2 MB; rpak does not delete app data
+Kept 126.2 MB; run "rpak clean --delete-data" to delete it
 Freed: 2 objects, 0.01 GB
 ```
 
 A system installation you cannot write to is only inspected, like above; one
 you name explicitly (`--system`) is an error then. `--dry-run` only reports
-and changes nothing at all, not even lock files. `-v` also lists what is kept
-and why. `rpak clean` exits with 1 if an installation could not be cleaned
-(busy, not writable, an I/O error), 2 for a usage error.
+and changes nothing at all, not even lock files; with `--delete-data` it
+counts the data of apps in the total, an object per app. `-v` also lists
+what is kept and why. `rpak clean` exits with 1 if an installation, or
+the data of an app, could not be cleaned (busy, not writable, an I/O
+error), 2 for a usage error.
 
 How it works, and why it is safe:
 
@@ -294,6 +304,4 @@ How it works, and why it is safe:
   downloading: `flatpak install --no-pull` or `flatpak update --no-pull` of
   that same commit fails, a normal install or update downloads the
   installers again.
-- `rpak clean` does not remove `-origin` remotes of uninstalled bundles, and
-  only lists the data of uninstalled apps (`flatpak clean --delete-data` of
-  the fork deletes it and resets the app's portal permissions).
+- `rpak clean` does not remove `-origin` remotes of uninstalled bundles.
