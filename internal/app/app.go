@@ -162,6 +162,9 @@ func run(version string, argv []string) int {
 	defer prep.unlock()
 
 	cmd := exec.Command(flatpak, argv...)
+	// flatpak prints argv[0] in its usage ("Usage: flatpak install ...");
+	// give it the name, as passthrough does, not the path.
+	cmd.Args[0] = "flatpak"
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// Checking for a signal and starting flatpak under the same lock leaves
 	// no window in which a signal would be neither acted on nor passed on.

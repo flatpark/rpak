@@ -27,6 +27,18 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Linked as "flatpak" (see linkedFlatpak), the test binary is a fake
+	// flatpak that sees its real argv[0], which a script cannot: the kernel
+	// replaces it with the script's path.
+	if exe, _ := os.Executable(); filepath.Base(exe) == "flatpak" {
+		f, err := os.OpenFile(filepath.Join(os.Getenv("FAKE_DIR"), "argv0"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			os.Exit(70)
+		}
+		fmt.Fprintf(f, "%q\n", os.Args)
+		f.Close()
+		os.Exit(0)
+	}
 	if os.Getenv("RPAK_TEST_AS_MAIN") == "1" {
 		os.Exit(app.Main("test"))
 	}
@@ -578,6 +590,50 @@ func TestHelpDoesNotPrefetch(t *testing.T) {
 			t.Errorf("%q: exit %d, hits %d\n%s", argv, out.code, e.hits.Load(), out.stderr)
 		}
 		e.assertArgv(argv)
+	}
+}
+
+// linkedFlatpak links (or copies) the test binary as $FAKE_DIR/bin/flatpak
+// and returns its path.
+func (e *env) linkedFlatpak() string {
+	e.t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	path := filepath.Join(e.fake, "bin", "flatpak")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	if os.Link(self, path) != nil {
+		data, err := os.ReadFile(self)
+		if err == nil {
+			err = os.WriteFile(path, data, 0o755)
+		}
+		if err != nil {
+			e.t.Fatal(err)
+		}
+	}
+	return path
+}
+
+// TestFlatpakArgv0: flatpak gets "flatpak" as argv[0], not its path, so
+// that its usage reads "Usage: flatpak install ...".
+func TestFlatpakArgv0(t *testing.T) {
+	e := newEnv(t)
+	flatpak := e.linkedFlatpak()
+	for _, argv := range [][]string{
+		{"install", "-h"},
+		{"-v", "update", "--user", "--help"},
+		{"list"}, // passthrough
+	} {
+		os.Remove(filepath.Join(e.fake, "argv0"))
+		cmd := e.command(argv...)
+		cmd.Env = append(cmd.Env, "RPAK_FLATPAK="+flatpak)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%q: %v\n%s", argv, err, out)
+		}
+		if got, want := e.read("argv0"), fmt.Sprintf("%q\n", append([]string{"flatpak"}, argv...)); got != want {
+			t.Errorf("%q: flatpak ran as\n%s, want\n%s", argv, got, want)
+		}
 	}
 }
 
