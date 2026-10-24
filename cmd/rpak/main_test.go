@@ -41,7 +41,9 @@ const fakeFlatpak = `#!/bin/sh
 d="$FAKE_DIR"
 echo "$*" >> "$d/calls"
 inst=${2#--}
-case "$1" in
+# The command is the first argument that is not a leading global option.
+for a; do case "$a" in -v*|--verbose|--ostree-verbose) ;; *) cmd=$a; break ;; esac; done
+case "$cmd" in
 remotes)
 	cat "$d/remotes-$inst" 2>/dev/null || { echo "error: no installation" >&2; exit 1; } ;;
 remote-ls)
@@ -51,7 +53,7 @@ remote-info)
 	f="$d/info/$inst/$remote/$(echo "$ref" | tr / _)"
 	[ -f "$f" ] || { echo "error: Nothing matches $ref in remote $remote" >&2; exit 1; }
 	cat "$f" ;;
-update|install)
+update|upgrade|install)
 	printf '%s\0' "$@" > "$d/argv"
 	: > "$d/check"
 	if [ -f "$d/expect" ]; then
@@ -71,6 +73,10 @@ update|install)
 		exit 99 ;;
 	esac
 	exit 0 ;;
+uninstall|list|clean|--version)
+	printf '%s\0' "$@" > "$d/argv"
+	echo "fake flatpak $cmd"
+	exit 5 ;;
 *)
 	echo "fake flatpak: unexpected $*" >&2; exit 64 ;;
 esac
@@ -481,24 +487,84 @@ func TestUsage(t *testing.T) {
 		argv []string
 		code int
 	}{
-		{nil, 2}, {[]string{"remove"}, 2}, {[]string{"help"}, 0}, {[]string{"-h"}, 0},
-		{[]string{"--help"}, 0}, {[]string{"--version"}, 0},
+		{nil, 2}, {[]string{"help"}, 0}, {[]string{"-h"}, 0}, {[]string{"--help"}, 0},
 	} {
 		cmd := e.command(c.argv...)
 		out, _ := cmd.CombinedOutput()
 		if cmd.ProcessState.ExitCode() != c.code {
 			t.Errorf("%q: exit %d, want %d", c.argv, cmd.ProcessState.ExitCode(), c.code)
 		}
-		if c.argv == nil || c.argv[0] != "--version" {
-			if !strings.Contains(string(out), "update") || !strings.Contains(string(out), "install") {
-				t.Errorf("%q: no usage:\n%s", c.argv, out)
-			}
-		} else if strings.TrimSpace(string(out)) != "rpak test" {
-			t.Errorf("--version: %q", out)
+		if !strings.Contains(string(out), "update") || !strings.Contains(string(out), "install") {
+			t.Errorf("%q: no usage:\n%s", c.argv, out)
 		}
 	}
 	if e.read("calls") != "" {
 		t.Error("flatpak was run")
+	}
+}
+
+func TestOtherCommandsPassThrough(t *testing.T) {
+	e := newEnv(t)
+	for _, argv := range [][]string{
+		{"uninstall", "--user", "-y", "com.example.One"},
+		{"list", "--columns=application"},
+		{"clean", "--dry-run"},
+		{"-v", "list"}, // a global option first, then a command rpak does not handle
+	} {
+		os.Remove(filepath.Join(e.fake, "calls"))
+		out := e.run(argv...)
+		if out.code != 5 {
+			t.Fatalf("%q: exit %d, want flatpak's 5\n%s", argv, out.code, out.stderr)
+		}
+		e.assertArgv(argv)
+		// No planning queries: flatpak is the only thing that ran.
+		if calls := strings.TrimSpace(e.read("calls")); calls != strings.Join(argv, " ") {
+			t.Errorf("%q: calls %q", argv, calls)
+		}
+	}
+
+	cmd := e.command("--version")
+	out, _ := cmd.CombinedOutput()
+	if cmd.ProcessState.ExitCode() != 5 || string(out) != "rpak test\nfake flatpak --version\n" {
+		t.Errorf("--version: exit %d, output %q", cmd.ProcessState.ExitCode(), out)
+	}
+}
+
+func TestLeadingGlobalOptionsAndUpgradeAlias(t *testing.T) {
+	e := newEnv(t)
+	e.write("remotes-user", "flatpark\n")
+	e.app("user", "flatpark", "app/com.example.One/x86_64/stable", "com.example.One", 10_000)
+	argv := []string{"-vv", "--ostree-verbose", "install", "--user", "-y", "flatpark", "com.example.One"}
+	out := e.run(argv...)
+	if out.code != 0 || !strings.Contains(out.stderr, "prefetching 1 extra-data file(s)") {
+		t.Fatalf("exit %d\n%s", out.code, out.stderr)
+	}
+	e.assertArgv(argv)
+	if check := e.read("check"); !strings.Contains(check, "ok ") {
+		t.Fatalf("file not in place: %s", check)
+	}
+
+	os.Remove(filepath.Join(e.fake, "expect"))
+	e.write("updates-user", "app/com.example.One/x86_64/stable\tflatpark\n")
+	e.app("user", "flatpark", "app/com.example.One/x86_64/stable", "app/com.example.One/x86_64/stable", 10_000)
+	out = e.run("upgrade", "--user", "-y")
+	if out.code != 0 || !strings.Contains(out.stderr, "prefetching 1 extra-data file(s)") {
+		t.Fatalf("upgrade: exit %d\n%s", out.code, out.stderr)
+	}
+	e.assertArgv([]string{"upgrade", "--user", "-y"})
+}
+
+func TestHelpDoesNotPrefetch(t *testing.T) {
+	e := newEnv(t)
+	e.write("updates-user", "app/com.example.One/x86_64/stable\tflatpark\n")
+	e.app("user", "flatpark", "app/com.example.One/x86_64/stable", "app/com.example.One/x86_64/stable", 10_000)
+	for _, argv := range [][]string{{"update", "--user", "--help"}, {"update", "--user", "-h"}} {
+		e.hits.Store(0)
+		out := e.run(argv...)
+		if out.code != 0 || e.hits.Load() != 0 || strings.Contains(out.stderr, "prefetching") {
+			t.Errorf("%q: exit %d, hits %d\n%s", argv, out.code, e.hits.Load(), out.stderr)
+		}
+		e.assertArgv(argv)
 	}
 }
 

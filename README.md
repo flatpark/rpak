@@ -39,10 +39,17 @@ Type `rpak` instead of `flatpak`. The arguments go to flatpak unchanged:
 rpak update                         # flatpak update, after prefetching what the pending updates need
 rpak update --user -y com.google.Chrome
 rpak install flatpark com.google.Chrome us.zoom.Zoom
+rpak list --app                     # any other command: rpak execs flatpak with it as is
 ```
 
+Only `install` and `update` (and its alias `upgrade`, also after leading
+`-v`/`--verbose`/`--ostree-verbose`) prefetch. Every other command, and
+`--help` on any command, replaces rpak with flatpak right away, so `rpak`
+can stand in for `flatpak` everywhere, aliases included.
+
 Example output (one line per event when stderr is not a terminal; on a
-terminal it is a single progress line that updates in place):
+terminal, a block with a line per active download and a summary line is
+redrawn in place, and finished files are listed above it):
 
 ```
 rpak: prefetching 3 extra-data file(s), 39.8 MiB:
@@ -64,7 +71,8 @@ flatpak.
 
 | Command / variable | Effect |
 |---|---|
-| `rpak --version`, `rpak help` | version, usage |
+| `rpak --version` | rpak's version, then `flatpak --version` |
+| `rpak help`, `rpak --help` | rpak's usage (`flatpak --help` for flatpak's) |
 | `RPAK_JOBS=N` | concurrent downloads, 1–16, default 4 (at most 4 per host) |
 | `RPAK_DRY_RUN=1` | only print the prefetch plan and the flatpak command; no downloads, flatpak is not run |
 | `RPAK_FLATPAK=/path/to/flatpak` | flatpak executable to use (default: `flatpak` from `PATH`) |

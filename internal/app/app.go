@@ -29,16 +29,53 @@ several at a time, then runs flatpak with the same arguments.
 Commands:
   update     prefetch, then run "flatpak update ARGS..."
   install    prefetch, then run "flatpak install ARGS..."
+  *          any other command runs "flatpak COMMAND ARGS..." unchanged
 
 Options:
   -h, --help     show this help
-  --version      show the version
+  --version      show the versions of rpak and flatpak
 
 Environment:
   RPAK_FLATPAK   flatpak executable to use (default: flatpak from PATH)
   RPAK_JOBS      concurrent downloads, 1-16 (default: 4)
   RPAK_DRY_RUN   if set to 1, only show the plan and the flatpak command
 `
+
+// flatpakPath is the flatpak to run: $RPAK_FLATPAK, or flatpak from PATH.
+func flatpakPath() string {
+	flatpak := os.Getenv("RPAK_FLATPAK")
+	if flatpak == "" {
+		flatpak = "flatpak"
+	}
+	if path, err := exec.LookPath(flatpak); err == nil {
+		return path
+	}
+	return flatpak
+}
+
+// leadingGlobal reports whether arg is a global flatpak option that may come
+// before the command and is not one that makes flatpak exit right away
+// (--version, --installations, ...): -v, -vv, --verbose, --ostree-verbose.
+func leadingGlobal(arg string) bool {
+	if arg == "--verbose" || arg == "--ostree-verbose" {
+		return true
+	}
+	return len(arg) > 1 && strings.Trim(arg[1:], "v") == "" && arg[0] == '-'
+}
+
+// passthrough replaces rpak with flatpak for every command rpak does not
+// handle itself, so that it behaves exactly like flatpak: same process,
+// signals, terminal and exit code.
+func passthrough(argv []string) int {
+	flatpak := flatpakPath()
+	if os.Getenv("RPAK_DRY_RUN") == "1" {
+		fmt.Fprintf(os.Stderr, "rpak: dry run, would run: %s\n", shellQuote(append([]string{flatpak}, argv...)))
+		return 0
+	}
+	err := syscall.Exec(flatpak, append([]string{"flatpak"}, argv...), os.Environ())
+	fmt.Fprintf(os.Stderr, "rpak: cannot run flatpak: %v\n", err)
+	return 127
+}
 
 // queryTimeout bounds each flatpak query command run while planning.
 const queryTimeout = 2 * time.Minute
@@ -54,26 +91,31 @@ func run(version string, argv []string) int {
 		return 2
 	}
 	switch argv[0] {
-	case "update", "install":
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stdout, usage)
 		return 0
 	case "--version":
 		fmt.Printf("rpak %s\n", version)
-		return 0
+		return passthrough(argv)
+	}
+	// flatpak takes global options before the command ("flatpak -v install").
+	i := 0
+	for i < len(argv) && leadingGlobal(argv[i]) {
+		i++
+	}
+	if i == len(argv) {
+		return passthrough(argv)
+	}
+	command, kind := argv[i], argv[i]
+	switch command {
+	case "upgrade": // flatpak's hidden alias of update
+		kind = "update"
+	case "update", "install":
 	default:
-		fmt.Fprintf(os.Stderr, "rpak: unknown command %q\n\n%s", argv[0], usage)
-		return 2
+		return passthrough(argv)
 	}
-	command, flatpakArgs := argv[0], argv[1:]
-
-	flatpak := os.Getenv("RPAK_FLATPAK")
-	if flatpak == "" {
-		flatpak = "flatpak"
-		if path, err := exec.LookPath("flatpak"); err == nil {
-			flatpak = path
-		}
-	}
+	flatpakArgs := argv[i+1:]
+	flatpak := flatpakPath()
 
 	// Signals are caught from the start: during prefetching they stop the
 	// downloads and rpak exits without running flatpak; once flatpak runs
@@ -101,9 +143,9 @@ func run(version string, argv []string) int {
 		}
 	}()
 
-	dirs, runFlatpak := prefetchPhase(ctx, version, command, flatpak, flatpakArgs)
+	dirs, runFlatpak := prefetchPhase(ctx, version, kind, flatpak, flatpakArgs, argv)
 
-	cmd := exec.Command(flatpak, append([]string{command}, flatpakArgs...)...)
+	cmd := exec.Command(flatpak, argv...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// Checking for a signal and starting flatpak under the same lock leaves
 	// no window in which a signal would be neither acted on nor passed on.
@@ -162,7 +204,9 @@ func exitCode(err error) int {
 // as warnings and only reduce what is prefetched. It returns the
 // directories to remove after a successful flatpak run, and false for a
 // dry run, after which flatpak must not be run.
-func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpakArgs []string) ([]string, bool) {
+// prefetchPhase plans and runs the downloads for command ("update" or
+// "install"); fullArgv is what flatpak will get, for the dry-run output.
+func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpakArgs, fullArgv []string) ([]string, bool) {
 	warn := func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, "rpak: warning: "+format+"\n", a...)
 	}
@@ -193,7 +237,7 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 			fmt.Fprintf(os.Stderr, "rpak: not prefetching because of %s\n", parsed.SkipReason)
 		}
 		printPlan(os.Stderr, p.Sources, baseDir)
-		fmt.Fprintf(os.Stderr, "rpak: dry run, would run: %s\n", shellQuote(append([]string{flatpak, command}, flatpakArgs...)))
+		fmt.Fprintf(os.Stderr, "rpak: dry run, would run: %s\n", shellQuote(append([]string{flatpak}, fullArgv...)))
 		return nil, false
 	}
 	if len(p.Sources) == 0 {

@@ -79,6 +79,7 @@ var shortFlags = map[rune]bool{'y': true, 'u': true, 'v': true, '?': true, 'h': 
 var skipOptions = map[string]bool{
 	"--no-pull": true, "--commit": true, "--bundle": true, "--from": true,
 	"--image": true, "--sideload-repo": true, "--appstream": true,
+	"--help": true, // flatpak only prints the help
 }
 
 // Parse interprets argv (the arguments after "update"/"install").
@@ -132,6 +133,9 @@ func Parse(command string, argv []string) Parsed {
 			for _, c := range arg[1:] {
 				if c == 'u' {
 					p.addInstallation(User)
+				}
+				if c == '?' || c == 'h' {
+					skip("--help")
 				}
 				if !shortFlags[c] {
 					unknown("-" + string(c))
