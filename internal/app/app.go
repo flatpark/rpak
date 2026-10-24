@@ -29,6 +29,7 @@ several at a time, then runs flatpak with the same arguments.
 Commands:
   update     prefetch, then run "flatpak update ARGS..."
   install    prefetch, then run "flatpak install ARGS..."
+  clean      free the space flatpak leaves behind (see "rpak clean --help")
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
 
 Options:
@@ -111,6 +112,8 @@ func run(version string, argv []string) int {
 	case "upgrade": // flatpak's hidden alias of update
 		kind = "update"
 	case "update", "install":
+	case "clean":
+		return cleanCommand(append(argv[:i:i], argv[i+1:]...), os.Stdout, os.Stderr)
 	default:
 		return passthrough(argv)
 	}

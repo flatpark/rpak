@@ -86,6 +86,8 @@ type env struct {
 	t    *testing.T
 	fake string // $FAKE_DIR
 	base string // FLATPAK_USER_DIR
+	sys  string // FLATPAK_SYSTEM_DIR; FLATPAK_CONFIG_DIR is empty
+	conf string
 	srv  *httptest.Server
 	hits atomic.Int64
 
@@ -110,7 +112,7 @@ func (e *env) file(path string) ([]byte, bool) {
 }
 
 func newEnv(t *testing.T) *env {
-	e := &env{t: t, fake: t.TempDir(), base: t.TempDir(), files: make(map[string][]byte)}
+	e := &env{t: t, fake: t.TempDir(), base: t.TempDir(), sys: t.TempDir(), conf: t.TempDir(), files: make(map[string][]byte)}
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.hits.Add(1)
 		e.mu.Lock()
@@ -184,6 +186,8 @@ func (e *env) command(argv ...string) *exec.Cmd {
 		"RPAK_FLATPAK="+filepath.Join(e.fake, "flatpak"),
 		"FAKE_DIR="+e.fake,
 		"FLATPAK_USER_DIR="+e.base,
+		"FLATPAK_SYSTEM_DIR="+e.sys,
+		"FLATPAK_CONFIG_DIR="+e.conf,
 		"HOME="+e.t.TempDir(),
 		"RPAK_DRY_RUN=",
 		"RPAK_JOBS=",
@@ -508,7 +512,6 @@ func TestOtherCommandsPassThrough(t *testing.T) {
 	for _, argv := range [][]string{
 		{"uninstall", "--user", "-y", "com.example.One"},
 		{"list", "--columns=application"},
-		{"clean", "--dry-run"},
 		{"-v", "list"}, // a global option first, then a command rpak does not handle
 	} {
 		os.Remove(filepath.Join(e.fake, "calls"))
