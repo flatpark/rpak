@@ -88,6 +88,36 @@ rpak: freed 29.0 MB of cached extra-data
 
 Downloads honour `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`.
 
+## Shell completion
+
+`rpak completion bash|zsh|fish` prints a completion script:
+
+```sh
+# zsh: a file named _rpak in a directory in $fpath, e.g. with
+# fpath=(~/.zfunc $fpath) before compinit in ~/.zshrc:
+rpak completion zsh > ~/.zfunc/_rpak
+# or in ~/.zshrc, after compinit:
+source <(rpak completion zsh)
+
+# bash, in ~/.bashrc:
+source <(rpak completion bash)
+
+# fish:
+rpak completion fish > ~/.config/fish/completions/rpak.fish
+```
+
+The scripts are flatpak's, calling `rpak complete` instead of
+`flatpak complete` (same protocol). rpak completes what it implements
+itself: the command name, with `clean` added to flatpak's commands, and
+the options of `rpak clean`, which are not those of `flatpak clean` in
+FlatPark's fork (no `--delete-data`). For every other command, `install`
+and `update` included, rpak asks your flatpak and passes its answer on, so
+refs, remotes and options are completed exactly as for flatpak.
+
+With `alias flatpak=rpak`, zsh expands the alias before completing, so
+rpak's completion is all it needs. In bash, also run
+`complete -o nospace -F __rpak flatpak` after loading rpak's script.
+
 ## How it works
 
 Before downloading an extra-data file, stock flatpak checks whether it is
