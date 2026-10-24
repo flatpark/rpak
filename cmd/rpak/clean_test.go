@@ -1,7 +1,7 @@
 package main
 
-// Integration tests of rpak clean, on installations built in temporary
-// directories.
+// Integration tests of rpak clean and of the clean-up after install and
+// update, on installations built in temporary directories.
 
 import (
 	"bufio"
@@ -362,6 +362,105 @@ func TestCleanUsage(t *testing.T) {
 	}
 	if e.read("calls") != "" {
 		t.Error("flatpak was run")
+	}
+}
+
+func TestReclaimAfterSuccess(t *testing.T) {
+	for _, command := range []string{"install", "update"} {
+		t.Run(command, func(t *testing.T) {
+			e := newEnv(t)
+			e.write("remotes-user", "flatpark\n")
+			e.write("updates-user", "")
+			meta := installation(t, e.base)
+			put(t, filepath.Join(e.base, "extra-data", strings.Repeat("d", 64), ".rpak-prefetch"), nil)
+			argv := []string{command, "--user", "-y"}
+			if command == "install" {
+				argv = append(argv, "flatpark", "org.example.App")
+			}
+
+			// flatpak fails: nothing is touched.
+			e.write("mode", "exit 1")
+			out := e.run(argv...)
+			if out.code != 1 || strings.Contains(out.stderr, "freed") {
+				t.Fatalf("exit %d\n%s", out.code, out.stderr)
+			}
+			if b, _ := os.ReadFile(meta); !bytes.Equal(b, fixture(t, "real.gvariant")) {
+				t.Fatal("stripped after flatpak failed")
+			}
+
+			e.write("mode", "exit 0")
+			out = e.run(argv...)
+			freed := 2 * (len(fixture(t, "real.gvariant")) - len(fixture(t, "real.stripped.gvariant")))
+			want := fmt.Sprintf("rpak: freed %.1f MB of cached extra-data\n", float64(freed)/(1<<20))
+			if out.code != 0 || !strings.HasSuffix(out.stderr, want) {
+				t.Fatalf("exit %d, want %q in\n%s", out.code, want, out.stderr)
+			}
+			if b, _ := os.ReadFile(meta); !bytes.Equal(b, fixture(t, "real.stripped.gvariant")) {
+				t.Error("not stripped after flatpak succeeded")
+			}
+			// Only a. runs: rpak clean's other clean-ups are left alone.
+			if _, err := os.Stat(filepath.Join(e.base, "extra-data", strings.Repeat("d", 64))); err != nil {
+				t.Error("a prefetch directory of an earlier run was removed")
+			}
+			// Nothing to free: nothing said.
+			out = e.run(argv...)
+			if out.code != 0 || strings.Contains(out.stderr, "freed") {
+				t.Errorf("exit %d\n%s", out.code, out.stderr)
+			}
+		})
+	}
+}
+
+func TestReclaimBusyKeepsExitCode(t *testing.T) {
+	for _, code := range []int{0, 3} {
+		e := newEnv(t)
+		e.write("updates-user", "")
+		meta := installation(t, e.base)
+		holdLock(t, filepath.Join(e.base, "repo-lock"))
+		e.write("mode", fmt.Sprintf("exit %d", code))
+		out := e.run("update", "--user", "-y")
+		if out.code != code {
+			t.Errorf("exit %d, want flatpak's %d\n%s", out.code, code, out.stderr)
+		}
+		if code == 0 && !strings.Contains(out.stderr, "the repository is busy") {
+			t.Errorf("no warning:\n%s", out.stderr)
+		}
+		if b, _ := os.ReadFile(meta); !bytes.Equal(b, fixture(t, "real.gvariant")) {
+			t.Error("stripped while locked")
+		}
+	}
+}
+
+func TestReclaimReadOnlySystemHint(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	e := newEnv(t)
+	e.write("updates-user", "")
+	e.write("updates-system", "")
+	installation(t, e.sys)
+	os.Chmod(filepath.Join(e.sys, "repo"), 0o555)
+	t.Cleanup(func() { os.Chmod(filepath.Join(e.sys, "repo"), 0o755) })
+	out := e.run("update", "-y")
+	freed := 2 * (len(fixture(t, "real.gvariant")) - len(fixture(t, "real.stripped.gvariant")))
+	want := fmt.Sprintf("rpak: run \"sudo rpak clean --system\" to free %.1f MB of cached extra-data\n", float64(freed)/(1<<20))
+	if out.code != 0 || !strings.HasSuffix(out.stderr, want) {
+		t.Errorf("exit %d, want %q in\n%s", out.code, want, out.stderr)
+	}
+}
+
+func TestReclaimNotInDryRun(t *testing.T) {
+	e := newEnv(t)
+	e.write("updates-user", "")
+	meta := installation(t, e.base)
+	cmd := e.command("update", "--user")
+	cmd.Env = append(cmd.Env, "RPAK_DRY_RUN=1")
+	out, _ := cmd.CombinedOutput()
+	if cmd.ProcessState.ExitCode() != 0 || strings.Contains(string(out), "freed") {
+		t.Errorf("exit %d\n%s", cmd.ProcessState.ExitCode(), out)
+	}
+	if b, _ := os.ReadFile(meta); !bytes.Equal(b, fixture(t, "real.gvariant")) {
+		t.Error("stripped in a dry run")
 	}
 }
 

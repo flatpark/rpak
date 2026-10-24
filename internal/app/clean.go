@@ -10,6 +10,7 @@ import (
 
 	"github.com/flatpark/rpak/internal/clean"
 	"github.com/flatpark/rpak/internal/installation"
+	"github.com/flatpark/rpak/internal/lock"
 	"github.com/flatpark/rpak/internal/prefetch"
 )
 
@@ -273,4 +274,50 @@ func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool) 
 	c.InterruptedDeploys(inst.Path)
 	c.Removed(inst.Path)
 	return readOnly, nil
+}
+
+// reclaim strips xa.extra-data from the repositories of the installations
+// an install or update used, after flatpak succeeded. It is quiet apart
+// from a total, never waits for a lock and never fails: problems are
+// warnings.
+func reclaim(options []string, stderr io.Writer) {
+	warn := func(format string, a ...any) { fmt.Fprintf(stderr, "rpak: warning: "+format+"\n", a...) }
+	insts, _, err := installation.Env{}.Select(options, false)
+	if err != nil {
+		warn("not freeing cached extra-data: %v", err)
+		return
+	}
+	var freed int64
+	for _, inst := range insts {
+		if !clean.HasRepo(inst.Path) {
+			continue
+		}
+		if !clean.Writable(inst.Path) {
+			if inst.User {
+				continue
+			}
+			c := &clean.Cleaner{DryRun: true}
+			c.StripExtraData(filepath.Join(inst.Path, "repo"))
+			if c.Freed > 0 {
+				fmt.Fprintf(stderr, "rpak: run \"%s\" to free %s of cached extra-data\n", sudoHint(inst), mb(c.Freed))
+			}
+			continue
+		}
+		release, err := clean.Lock(inst.Path)
+		if err != nil {
+			if errors.Is(err, lock.ErrBusy) {
+				warn("%s: the repository is busy, not freeing cached extra-data; run \"rpak clean\" later", inst.Title())
+			} else {
+				warn("%s: not freeing cached extra-data: %v", inst.Title(), err)
+			}
+			continue
+		}
+		c := &clean.Cleaner{Warn: warn}
+		c.StripExtraData(filepath.Join(inst.Path, "repo"))
+		release()
+		freed += c.Freed
+	}
+	if freed > 0 {
+		fmt.Fprintf(stderr, "rpak: freed %s of cached extra-data\n", mb(freed))
+	}
 }

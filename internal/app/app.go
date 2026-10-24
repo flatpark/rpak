@@ -32,6 +32,9 @@ Commands:
   clean      free the space flatpak leaves behind (see "rpak clean --help")
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
 
+After a successful install or update, rpak removes the copies of the
+extra-data installers that flatpak keeps in the repositories involved.
+
 Options:
   -h, --help     show this help
   --version      show the versions of rpak and flatpak
@@ -184,6 +187,11 @@ func run(version string, argv []string) int {
 			}
 		}
 	}
+	prep.unlock()
+	// flatpak has just written the installers into the commits it pulled.
+	if code == 0 && prep.parsed.SkipReason != "--help" {
+		reclaim(prep.parsed.Installations, os.Stderr)
+	}
 	return code
 }
 
@@ -206,6 +214,7 @@ func exitCode(err error) int {
 
 // prepared is the outcome of prefetchPhase.
 type prepared struct {
+	parsed args.Parsed
 	// dirs are the directories to remove after a successful flatpak run.
 	dirs []string
 	// runFlatpak is false for a dry run, after which flatpak must not run.
@@ -225,7 +234,7 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 	}
 	dryRun := os.Getenv("RPAK_DRY_RUN") != "" && os.Getenv("RPAK_DRY_RUN") != "0"
 	parsed := args.Parse(command, flatpakArgs)
-	prep := prepared{runFlatpak: !dryRun, unlock: func() {}}
+	prep := prepared{parsed: parsed, runFlatpak: !dryRun, unlock: func() {}}
 
 	baseDir, err := prefetch.DefaultUserBaseDir()
 	if err != nil {
