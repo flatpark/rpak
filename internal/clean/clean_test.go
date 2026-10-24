@@ -450,3 +450,34 @@ func TestLockIsExclusive(t *testing.T) {
 func equal(a, b []string) bool {
 	return strings.Join(a, "\n") == strings.Join(b, "\n")
 }
+
+// TestReadDirOrder: entries come in inode order, as GLib's enumerator
+// returns them, whatever readdir() order the file system has.
+func TestReadDirOrder(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 50; i++ {
+		write(t, filepath.Join(dir, fmt.Sprintf("f%02d", (i*37)%50)), nil, 0o644)
+	}
+	mkdir(t, filepath.Join(dir, "sub"))
+	os.Symlink("f00", filepath.Join(dir, "link"))
+	entries, err := readDir(dir)
+	if err != nil || len(entries) != 52 {
+		t.Fatalf("%d entries, %v", len(entries), err)
+	}
+	var last uint64
+	for _, e := range entries {
+		var st unix.Stat_t
+		unix.Lstat(filepath.Join(dir, e.Name()), &st)
+		if st.Ino < last {
+			t.Errorf("%s out of inode order", e.Name())
+		}
+		last = st.Ino
+		info, _ := e.Info()
+		if e.Type() != info.Mode().Type() {
+			t.Errorf("%s: type %v, lstat says %v", e.Name(), e.Type(), info.Mode().Type())
+		}
+	}
+	if _, err := readDir(filepath.Join(dir, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing directory: %v", err)
+	}
+}

@@ -365,7 +365,7 @@ func refFragment(name string) bool {
 // alone.
 func (c *Cleaner) PrefetchDirs(userBase string) {
 	root := filepath.Join(userBase, "extra-data")
-	entries, err := os.ReadDir(root)
+	entries, err := readDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return
 	}
@@ -414,7 +414,7 @@ func (c *Cleaner) RepoLeftovers(repo string) {
 		c.report(0, fmt.Sprintf("%s: %d empty %s", filepath.Join(repo, "refs"), removed, noun))
 	}
 
-	states, _ := os.ReadDir(filepath.Join(repo, "state"))
+	states, _ := readDir(filepath.Join(repo, "state"))
 	for _, e := range states {
 		checksum, ok := strings.CutSuffix(e.Name(), ".commitpartial")
 		if !ok || !metadata.ValidChecksum(checksum) {
@@ -445,7 +445,7 @@ func (c *Cleaner) RepoLeftovers(repo string) {
 // empty directories in a deployment are mount points.
 func (c *Cleaner) InterruptedDeploys(installation string) {
 	for _, kind := range []string{"app", "runtime"} {
-		ids, _ := os.ReadDir(filepath.Join(installation, kind))
+		ids, _ := readDir(filepath.Join(installation, kind))
 		for _, id := range ids {
 			idDir := filepath.Join(installation, kind, id.Name())
 			arches, _ := readDirNoFollow(idDir)
@@ -489,7 +489,28 @@ func readDirNoFollow(dir string) ([]fs.DirEntry, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%s: not a directory", dir)
 	}
-	return os.ReadDir(dir)
+	return readDir(dir)
+}
+
+// readDir lists dir in the order g_file_enumerate_children() returns its
+// entries, so that items come out in the order flatpak clean prints them:
+// GLib's local enumerator reads up to 1000 entries at a time and sorts
+// each batch by inode number (next_file_helper() in
+// gio/glocalfileenumerator.c).
+func readDir(dir string) ([]fs.DirEntry, error) {
+	entries, err := readDirents(dir)
+	if err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(entries); start += 1000 {
+		chunk := entries[start:min(start+1000, len(entries))]
+		sort.SliceStable(chunk, func(i, j int) bool { return chunk[i].ino < chunk[j].ino })
+	}
+	out := make([]fs.DirEntry, len(entries))
+	for i := range entries {
+		out[i] = &entries[i]
+	}
+	return out, nil
 }
 
 // isDeployTmpdir is is_deploy_tmpdir(): flatpak_dir_deploy() checks out
@@ -562,7 +583,7 @@ func (c *Cleaner) emptyDirs(dir string, removeSelf bool, maxDepth int, removed *
 // not necessarily everything.
 func (c *Cleaner) Removed(installation string) {
 	root := filepath.Join(installation, ".removed")
-	entries, err := os.ReadDir(root)
+	entries, err := readDir(root)
 	if err != nil {
 		return
 	}
