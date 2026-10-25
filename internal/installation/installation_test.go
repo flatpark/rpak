@@ -133,3 +133,38 @@ func TestTitles(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthenticatedRemotes(t *testing.T) {
+	dir := t.TempDir()
+	inst := Installation{ID: "user", Path: dir, User: true}
+	if got, err := inst.AuthenticatedRemotes(); err != nil || got != nil {
+		t.Fatalf("no repository: %q, %v", got, err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := `[core]
+repo_version=1
+mode=bare-user-only
+
+[remote "flathub"]
+url=https://dl.flathub.org/repo/
+xa.title=Flathub
+
+[remote "paid"]
+url=https://example.com/repo/
+xa.authenticator-name=com.example.Authenticator
+xa.authenticator-install=true
+
+[remote "empty"]
+url=https://example.org/repo/
+xa.authenticator-name=
+`
+	if err := os.WriteFile(filepath.Join(dir, "repo", "config"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := inst.AuthenticatedRemotes()
+	if err != nil || !reflect.DeepEqual(got, []string{"paid"}) {
+		t.Fatalf("got %q, %v; want [paid]", got, err)
+	}
+}

@@ -300,3 +300,29 @@ func (e Env) All() []Installation {
 	configured, _ := e.Configured()
 	return append(out, configured...)
 }
+
+// AuthenticatedRemotes returns the remotes of the installation whose
+// configuration (the [remote "NAME"] groups of repo/config) names an
+// authenticator, xa.authenticator-name: pulling from them can make
+// flatpak ask for a user name and password. A missing repository has
+// none.
+func (i Installation) AuthenticatedRemotes() ([]string, error) {
+	text, err := os.ReadFile(filepath.Join(i.Path, "repo", "config"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, g := range metadata.KeyFile(string(text)) {
+		name, ok := strings.CutPrefix(g.Name, `remote "`)
+		if !ok || !strings.HasSuffix(name, `"`) {
+			continue
+		}
+		if g.Values["xa.authenticator-name"] != "" {
+			out = append(out, name[:len(name)-1])
+		}
+	}
+	return out, nil
+}
