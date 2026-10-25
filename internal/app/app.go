@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/flatpark/rpak/internal/args"
+	"github.com/flatpark/rpak/internal/metadata"
 	"github.com/flatpark/rpak/internal/plan"
 	"github.com/flatpark/rpak/internal/prefetch"
 )
@@ -31,6 +32,9 @@ Commands:
   completion print the completion script for bash, zsh or fish
              (see "rpak completion --help" for how to install it)
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
+
+On a terminal and without -y, flatpak starts at once and asks while rpak
+prefetches; a "yes" reaches it when the prefetch is done.
 
 After a successful install or update (without --no-deploy), rpak removes
 the copies of the extra-data installers that flatpak keeps in the
@@ -164,28 +168,40 @@ func run(version string, argv []string) int {
 	// give it the name, as passthrough does, not the path.
 	cmd.Args[0] = "flatpak"
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	// Checking for a signal and starting flatpak under the same lock leaves
-	// no window in which a signal would be neither acted on nor passed on.
-	mu.Lock()
-	if sig := received; sig != nil {
-		mu.Unlock()
-		fmt.Fprintf(os.Stderr, "rpak: interrupted, not running flatpak; partial downloads are kept for the next run\n")
-		return 128 + int(sig.(syscall.Signal))
-	}
-	if !prep.runFlatpak { // dry run
-		mu.Unlock()
-		return 0
-	}
-	err := cmd.Start()
-	if err == nil {
+	// start starts flatpak, unless a signal came first or this is a dry
+	// run; if it does not, code is rpak's exit code. Checking for a signal
+	// and starting flatpak under the same lock leaves no window in which a
+	// signal would be neither acted on nor passed on.
+	start := func() (code int, started bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if sig := received; sig != nil {
+			fmt.Fprintf(os.Stderr, "rpak: interrupted, not running flatpak; partial downloads are kept for the next run\n")
+			return 128 + int(sig.(syscall.Signal)), false
+		}
+		if !prep.runFlatpak { // dry run
+			return 0, false
+		}
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "rpak: cannot run flatpak: %v\n", err)
+			return 127, false
+		}
 		child = cmd.Process
+		return 0, true
 	}
-	mu.Unlock()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "rpak: cannot run flatpak: %v\n", err)
-		return 127
+	var code int
+	if prep.console != nil {
+		var started bool
+		if code, started = prep.runInteractive(ctx, cmd, start); !started {
+			return code
+		}
+	} else {
+		var started bool
+		if code, started = start(); !started {
+			return code
+		}
+		code = exitCode(cmd.Wait())
 	}
-	code := exitCode(cmd.Wait())
 
 	// Remove what we placed only when flatpak succeeded; after a failure or
 	// a "no" at its prompt the files are kept for the next attempt (and
@@ -233,6 +249,56 @@ type prepared struct {
 	// unlock releases the prefetch directories (see prefetch.LockShared)
 	// once they have been removed; it may be called more than once.
 	unlock func()
+
+	// For the interactive mode (interactive.go): the pseudo-terminal for
+	// flatpak's stdin, and the downloads still to do, under the lock.
+	console *console
+	sources []metadata.Source
+	cfg     prefetch.Config
+}
+
+// runInteractive starts flatpak with its stdin on the pseudo-terminal and
+// downloads in the background, then waits for flatpak. When flatpak exits
+// the downloads still running are canceled, and the summary line follows
+// flatpak's output if they all ended. prep.dirs is set only then: the
+// directories of a canceled run are kept for the next one.
+func (prep *prepared) runInteractive(ctx context.Context, cmd *exec.Cmd, start func() (int, bool)) (code int, started bool) {
+	c := prep.console
+	defer c.close()
+	cmd.Stdin = c.slave
+	if code, started := start(); !started {
+		return code, false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	t := detectTerm(os.Stderr)
+	rep := newReporter(os.Stderr, t, prep.sources)
+	rep.transient, rep.quiet = true, true
+	var (
+		summary  prefetch.Summary
+		complete bool
+		done     = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		summary = rep.run(ctx, prep.cfg, prep.sources)
+		complete = ctx.Err() == nil
+	}()
+	stop := c.start(func() <-chan struct{} {
+		if rep.show() {
+			return done
+		}
+		return nil
+	})
+	code = exitCode(cmd.Wait())
+	stop()
+	cancel()
+	<-done
+	if complete {
+		prep.dirs = summary.Dirs
+		writeLines(os.Stderr, t, []line{rep.summary(summary)})
+	}
+	return code, true
 }
 
 // prefetchPhase plans and runs the downloads for command ("update" or
@@ -299,9 +365,17 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 		}
 	}
 
-	printPlan(os.Stderr, p.Sources, "")
 	cfg := prefetch.NewConfig(baseDir, version)
 	cfg.Jobs = jobs(warn)
+	if interactive(parsed) == "" {
+		c, err := openConsole()
+		if err == nil {
+			prep.console, prep.sources, prep.cfg = c, p.Sources, cfg
+			return prep
+		}
+		warnSequential(err)
+	}
+	printPlan(os.Stderr, p.Sources, "")
 	summary := download(ctx, cfg, p.Sources)
 	if ctx.Err() != nil {
 		return prep

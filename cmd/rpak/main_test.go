@@ -46,9 +46,11 @@ func TestMain(m *testing.M) {
 }
 
 // fakeFlatpak answers queries from files in $FAKE_DIR. When run as
-// update/install it records its argv (NUL-separated), checks that the files
-// listed in $FAKE_DIR/expect are in place with the right checksum, and then
-// behaves as $FAKE_DIR/mode says. As complete it records its argv, prints
+// update/install it records its argv (NUL-separated) and the name of the
+// terminal of its stdin (tty), checks that the files listed in
+// $FAKE_DIR/expect are in place with the right checksum, and then behaves
+// as $FAKE_DIR/mode says; the prompt modes (interactive_test.go) ask a
+// question, record the answer and check the files again. As complete it records its argv, prints
 // $FAKE_DIR/complete-out and exits with $FAKE_DIR/complete-exit. As
 // permission-reset it appends its arguments to $FAKE_DIR/permission-reset,
 // a line per call, and fails if $FAKE_DIR/permission-reset-fail exists.
@@ -70,15 +72,52 @@ remote-info)
 	cat "$f" ;;
 update|upgrade|install)
 	printf '%s\0' "$@" > "$d/argv"
-	: > "$d/check"
-	if [ -f "$d/expect" ]; then
-		while read -r path sum; do
-			got=$(sha256sum "$path" 2>/dev/null | cut -d' ' -f1)
-			[ "$got" = "$sum" ] && echo "ok $path" >> "$d/check" || echo "MISSING $path" >> "$d/check"
-		done < "$d/expect"
-	fi
+	tty > "$d/tty"
+	check() {
+		: > "$d/check"
+		if [ -f "$d/expect" ]; then
+			while read -r path sum; do
+				got=$(sha256sum "$path" 2>/dev/null | cut -d' ' -f1)
+				[ "$got" = "$sum" ] && echo "ok $path" >> "$d/check" || echo "MISSING $path" >> "$d/check"
+			done < "$d/expect"
+		fi
+	}
+	check
 	mode=$(cat "$d/mode" 2>/dev/null)
 	case "$mode" in
+	prompt*)
+		[ -t 0 ] && [ -t 1 ] || { echo "no terminal" > "$d/answer"; exit 90; }
+		printf 'Proceed with these changes to the user installation? [Y/n]: '
+		IFS= read -r answer || answer="<EOF>"
+		check
+		printf '%s\n' "$answer" > "$d/answer"
+		case "$answer" in [nN]|[nN][oO]|"<EOF>") exit 1 ;; esac
+		case "$mode" in
+		*raw*)
+			# As in a transaction: stdin out of canonical mode, reading
+			# the answer to a cursor position query.
+			stty -icanon -echo
+			touch "$d/raw"
+			dd bs=1 count=6 2>/dev/null > "$d/rawin"
+			stty icanon echo ;;
+		*polkit*)
+			# As polkit's text agent during a transaction.
+			stty -icanon -echo
+			i=0
+			until stty -a < /dev/tty | grep -q -- -icanon || [ $i -gt 100 ]; do sleep 0.05; i=$((i+1)); done
+			old=$(stty -g < /dev/tty)
+			printf 'Password: '
+			stty -echo -echoe -echok -echonl < /dev/tty
+			touch "$d/pwprompt"
+			# The password is typed before the agent reads it.
+			sleep 0.3
+			IFS= read -r pw < /dev/tty
+			stty "$old" < /dev/tty
+			printf '%s\n' "$pw" > "$d/pw"
+			stty icanon echo ;;
+		esac
+		echo "Changes complete."
+		exit 0 ;;
 	exit*) exit "${mode#exit }" ;;
 	kill) kill -TERM $$ ;;
 	trap)
