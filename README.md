@@ -1,442 +1,105 @@
 # rpak
 
-rpak wraps `flatpak update` and `flatpak install`: it first downloads the
-original installers that extra-data apps need, **several at a time**, and then
-runs your system's flatpak with exactly the arguments you gave it. Afterwards
-it frees the copy of those installers that flatpak keeps in its repository,
-and `rpak clean` does the same for everything installed before.
+rpak is a wrapper around flatpak. It aims to accept every flatpak command
+and option, and adds two things:
 
-## Why
-
-Many proprietary apps on FlatPark are extra-data apps: the repository only
-holds the packaging, and flatpak downloads the vendor's installer (tens of MB
-to over a GB) when the app is installed or updated. Stock flatpak downloads
-these **one after another over a single connection**, which is slow when
-several such apps update at once. rpak does not replace or patch flatpak. It
-is a single static binary that lives next to your distribution's flatpak and
-only places the files, before flatpak runs, in the local directory flatpak
-checks first.
+- **Parallel downloads.** `install` and `update` download the installers
+  of extra-data apps (most proprietary apps on FlatPark) several at a time;
+  flatpak alone fetches them one after another.
+- **Cleaning up.** flatpak keeps a copy of every such installer in its
+  repository. rpak frees it after each install or update, and `rpak clean`
+  frees it and other leftovers for everything installed before.
 
 ## Installation
-
-Download the binary for your architecture and put it in your `PATH`:
 
 ```sh
 curl -Lo ~/.local/bin/rpak https://github.com/flatpark/rpak/releases/latest/download/rpak-linux-amd64   # aarch64: rpak-linux-arm64
 chmod +x ~/.local/bin/rpak
 ```
 
-To build from source (needs Go; the result is a static `CGO_ENABLED=0` binary):
-
-```sh
-make build        # ./rpak
-make dist         # dist/rpak-linux-amd64, dist/rpak-linux-arm64
-```
+Optionally add `alias flatpak=rpak` to your shell's startup file. To build
+from source: `make build` (needs Go).
 
 ## Usage
 
-Type `rpak` instead of `flatpak`. The arguments go to flatpak unchanged:
+Use `rpak` where you would use `flatpak`:
 
 ```sh
-rpak update                         # flatpak update, after prefetching what the pending updates need
-rpak update --user -y com.google.Chrome
-rpak install flatpark com.google.Chrome us.zoom.Zoom
-rpak clean --dry-run                # what rpak clean would free (see below)
-rpak list --app                     # any other command: rpak execs flatpak with it as is
+rpak install flatpark com.google.Chrome
+rpak update
+rpak clean
+rpak list --app          # other commands run flatpak unchanged
 ```
 
-Only `install` and `update` (and its alias `upgrade`, also after leading
-`-v`/`--verbose`/`--ostree-verbose`) prefetch, and `clean` is rpak's own.
-Every other command, and `--help` on any of them but `clean`, replaces rpak
-with flatpak right away, so `rpak` can stand in for `flatpak` everywhere,
-aliases included.
+### install and update
 
-Example output on a terminal. The plan comes first; then a block at the
-bottom, redrawn in place, shows each active download and the total with a
-bar, the speed and the time left, and every file that is done leaves a line
-above it. When prefetching ends the block is erased, leaving the plain
-lines and a summary, and flatpak's own output follows:
+flatpak asks for confirmation as usual while rpak downloads in the
+background. If you answer before the downloads are done, their progress
+shows until they finish, then flatpak goes on:
 
 ```
-rpak: prefetching 3 extra-data file(s):
-
-  ID                         File                  Size  Host
-  app.audionaut.Audionaut    audionaut.deb      11.2 MB  github.com
-  com.ferrispad.FerrisPad    FerrisPad-linux    13.9 MB  github.com
-  ai.storyteller.soundcraft  soundcraft.tar.gz  16.5 MB  github.com
-                             3 files            41.6 MB
-
-  ✓ audionaut.deb      11.2 MB in 9.8s, 1.2 MB/s
-    soundcraft.tar.gz  ███████████▏      74%  12.3 / 16.5 MB    1.2 MB/s  00:03
-    FerrisPad-linux    █▌                10%   1.5 / 13.9 MB    3.0 MB/s  00:04
-    Total 1/3          █████████         60%  25.0 / 41.6 MB    2.6 MB/s  00:06
+Proceed with these changes to the user installation? [Y/n]:
+    chrome.deb  ███████████▏      74%  107.2 / 144.8 MB    9.6 MB/s  00:04
+    Total 0/1   ███████████▏      74%  107.2 / 144.8 MB    9.6 MB/s  00:04
 ```
 
-Lines are cut to the width of the terminal (names in the middle, and
-narrow terminals get fewer columns), so that nothing wraps. Colours are
-used only on a terminal and not with `NO_COLOR` set; with `TERM=dumb` (or
-no `TERM`) there are neither colours nor redrawing. Then, as when stderr is
-not a terminal, every event gets a time-stamped line, and the progress one
-every 10 seconds:
+Answering `n` cancels; what was downloaded is kept for the next run. With
+`-y`, or when not on a terminal, rpak downloads first and then runs
+flatpak. A failed download never stops the install: flatpak then downloads
+that file itself.
 
-```
-rpak: prefetching 3 extra-data file(s):
-
-  ID                         File                  Size  Host
-  ...
-
-rpak: 13:48:55.881 start soundcraft.tar.gz (github.com)
-rpak: 13:48:55.881 start audionaut.deb (github.com)
-rpak: 13:49:05.607 done audionaut.deb, 11.2 MB in 9.7s, 1.2 MB/s
-rpak: 13:49:05.607 start FerrisPad-linux (github.com)
-rpak: 13:49:05.881 progress: 1/3 files, 23.6 / 41.6 MB (56%), 2.4 MB/s, 2 active
-rpak: 13:49:06.194 done soundcraft.tar.gz, 16.5 MB in 10.3s, 1.6 MB/s
-rpak: 13:49:10.060 done FerrisPad-linux, 13.9 MB in 4.5s, 3.1 MB/s
-rpak: prefetch done: 3 ready (3 downloaded, 0 reused), 0 skipped/failed, 41.6 MB in 14.2s
-
-... flatpak's own output follows
-```
-
-That is the order with `-y` (or `--assumeyes`, `--noninteractive`), or when
-stdin or stdout is not a terminal. Otherwise flatpak would ask its
-questions only after the downloads, so rpak asks them while it downloads:
-
-- flatpak starts as soon as rpak knows what to prefetch, and shows the
-  transaction and its question. The downloads run in the background and
-  print nothing; the plan table is not shown.
-- An answer that lets flatpak go ahead (Enter, `y`, ...) waits for the
-  downloads. Meanwhile the progress block shows below it; when the downloads
-  end it is erased and flatpak gets the answer. If they are done before you
-  answer, flatpak gets it at once and you see nothing of rpak.
-- `n` (or `no`) reaches flatpak at once. The downloads stop when flatpak
-  exits, and what was downloaded is kept for the next run.
-- The summary line follows flatpak's output.
-
-```
-Proceed with these changes to the system installation? [Y/n]: y
-    soundcraft.tar.gz  ███████████▏      74%  12.3 / 16.5 MB    1.2 MB/s  00:03
-    Total 2/3          █████████         60%  25.0 / 41.6 MB    2.6 MB/s  00:06
-```
-
-This interactive mode is also off with `TERM=dumb` (or no `TERM`), where
-the progress could not be erased, and when a remote of the installations
-involved has an authenticator (`xa.authenticator-name` in its
-configuration): flatpak may then ask for a password, and the terminal
-would show it as you type.
-
-If there is nothing to prefetch, rpak prints nothing and goes straight to
-flatpak. After flatpak, if it succeeded and there was space to free (see
-[Cleaning up](#cleaning-up)), rpak prints one more line:
-
-```
-rpak: freed 29.0 MB of cached extra-data
-```
-
-| Command / variable | Effect |
-|---|---|
-| `rpak --version` | rpak's version, then `flatpak --version` |
-| `rpak help`, `rpak --help` | rpak's usage (`flatpak --help` for flatpak's) |
-| `RPAK_JOBS=N` | concurrent downloads, 1–16, default 4 (at most 4 per host) |
-| `RPAK_DRY_RUN=1` | only print the prefetch plan and the flatpak command; no downloads, flatpak is not run, nothing is cleaned |
-| `RPAK_FLATPAK=/path/to/flatpak` | flatpak executable to use (default: `flatpak` from `PATH`) |
-
-Downloads honour `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`.
-
-## Shell completion
-
-`rpak completion bash|zsh|fish` prints a completion script:
-
-```sh
-# zsh: a file named _rpak in a directory in $fpath, e.g. with
-# fpath=(~/.zfunc $fpath) before compinit in ~/.zshrc:
-rpak completion zsh > ~/.zfunc/_rpak
-# or in ~/.zshrc, after compinit:
-source <(rpak completion zsh)
-
-# bash, in ~/.bashrc:
-source <(rpak completion bash)
-
-# fish:
-rpak completion fish > ~/.config/fish/completions/rpak.fish
-```
-
-The scripts are flatpak's, calling `rpak complete` instead of
-`flatpak complete` (same protocol). rpak completes what it implements
-itself: the command name, with `clean` added to flatpak's commands, and
-the options of `rpak clean`. For every other command, `install` and
-`update` included, rpak asks your flatpak and passes its answer on, so
-refs, remotes and options are completed exactly as for flatpak.
-
-With `alias flatpak=rpak`, zsh expands the alias before completing, so
-rpak's completion is all it needs. In bash, also run
-`complete -o nospace -F __rpak flatpak` after loading rpak's script.
-
-## How it works
-
-Before downloading an extra-data file, stock flatpak checks whether it is
-already available locally. This is long-standing upstream code, in
-`flatpak_dir_pull_extra_data_to_bytes()` in `common/flatpak-dir.c`. The path
-it checks is:
-
-```
-<user base dir>/extra-data/<sha256>/<name>
-```
-
-`<user base dir>` is `$FLATPAK_USER_DIR`, otherwise `$XDG_DATA_HOME/flatpak`,
-otherwise `~/.local/share/flatpak`. It is the directory of **the user running
-flatpak** even when installing into the system installation. If the file
-exists, flatpak reads all of it and checks its size and sha256. If either is
-wrong, the install fails; flatpak does not fall back to downloading. If the
-file does not exist, flatpak downloads it as usual.
-
-What rpak does:
-
-1. Parses the arguments (with flatpak 1.18's option tables) to find the refs,
-   remotes and installations involved. For `update` it uses
-   `flatpak remote-ls --updates`. For `install` it recognises REMOTE the way
-   flatpak does. Without a REMOTE, it only prefetches when exactly one remote
-   has the ref.
-2. Reads each ref's `[Extra Data]` (name, sha256, size, URL) with
-   `flatpak remote-info --show-metadata`.
-3. Downloads concurrently to `extra-data/<sha256>/<name>.part`. The file is
-   renamed to `<name>` only after its size and sha256 match, so a file under
-   the real name is never incomplete or unverified. The directory gets a
-   `.rpak-prefetch` marker. rpak never writes to or deletes a directory or
-   file without that marker (one the user or another tool put there). A
-   `.part` left by an interrupted run is resumed with a Range request.
-4. Runs `flatpak update|install ARGS...` unchanged. flatpak inherits the
-   terminal, and SIGINT/SIGTERM/SIGHUP are forwarded to it. rpak exits with
-   flatpak's exit code, or 128+signal if flatpak was killed. When flatpak
-   uses a local file, `-v` shows `Loading extra-data from local file ...`.
-
-   In interactive mode flatpak runs while step 3 is under way, with its
-   stdout and stderr on the terminal and its stdin on a pseudo-terminal of
-   rpak's (flatpak only asks when stdin is a terminal). The terminal still
-   echoes and edits what you type; rpak passes each line on, or holds it
-   back as described above. During the transaction flatpak puts its stdin
-   in raw mode and reads the terminal's replies to cursor position
-   queries; rpak then puts the terminal in raw mode too and passes bytes on
-   as they come, and restores the terminal's mode afterwards. When someone
-   else changes the terminal's mode to read from it, such as polkit's text
-   agent asking for a password on `/dev/tty`, rpak leaves the input to it
-   until the mode is back.
-5. If flatpak succeeds, rpak removes the marked directories it placed. If
-   flatpak fails, or you answer "n" at its prompt, they are kept and the next
-   attempt reuses them: they are verified again but not downloaded again. At
-   startup rpak removes marked directories older than 3 days.
-
-**Prefetching is best effort.** Nothing that goes wrong in it stops or
-changes the flatpak run: an unparsable command line, a failing `remote-info`,
-network errors, checksum mismatches, a full disk. Each problem prints one
-warning and skips that ref or file. flatpak gets byte-for-byte the arguments
-you typed, so the worst case is the same as running flatpak directly. A wrong
-path or name is just a miss, and flatpak downloads the file itself.
-
-Ctrl-C while prefetching stops all downloads and keeps the `.part` files.
-rpak then exits with 130 (143 for SIGTERM) without running flatpak. In
-interactive mode flatpak is already running and gets the Ctrl-C as well:
-rpak erases its progress, stops the downloads when flatpak exits, and exits
-with flatpak's code.
-
-## Cleaning up
-
-When stock flatpak pulls an extra-data app, it puts the downloaded
-installers, whole, into the detached metadata of the commit
-(`repo/objects/XX/CHECKSUM.commitmeta`, key `xa.extra-data`). Once the app is
-deployed they are never read again (only `flatpak install --no-pull` of the
-same commit would), yet they stay there, one more copy with every update of
-the app. That is easily gigabytes. The same file also holds the commit's
-signatures (`ostree.gpgsigs`), so it cannot simply be deleted.
-
-**After `rpak install` and `rpak update`.** When flatpak exits with 0, rpak
-removes `xa.extra-data` from every commit in the repositories of the
-installations the command used (`--user`, `--system`, `--installation=NAME`,
-or by default the user and the default system installation), and prints a
-total. It never waits: if another flatpak is busy with a repository, rpak
-skips it with a warning. A system installation that rpak cannot write to (you
-are not root) is only looked at: if there is something to free, rpak says
-`run "sudo rpak clean --system" to free X`. Nothing here changes rpak's exit
-code, which is always flatpak's. `RPAK_DRY_RUN=1` skips it, and so does
-`--no-deploy`: what that pulled is deployed later with `--no-pull`, from the
-installers in the repository.
-
-**`rpak clean`** does that for all installations, and removes leftovers:
+### clean
 
 ```
 rpak clean [--user | --system | --installation=NAME]... [--dry-run] [--delete-data] [-v]
 ```
 
-- `xa.extra-data` in the detached metadata of every commit, deployed or not.
-  Only that key is removed; every other entry (signatures and all) is copied
-  byte for byte.
-- rpak's own prefetch directories in `<user base dir>/extra-data`: those with
-  a `.rpak-prefetch` marker, including `.part` files of interrupted downloads
-  and files kept for a retry. Directories without the marker are never
-  touched, flatpak's own `.flatpak-prefetch` ones included. Skipped while
-  another rpak is prefetching.
-- Leftovers: directories under `repo/refs/{heads,remotes,mirrors}` that hold
-  only empty directories; `repo/state/CHECKSUM.commitpartial` markers of
-  commits that no longer exist; checkouts of interrupted deploys
-  (`{app,runtime}/ID/ARCH/BRANCH/.CHECKSUM-XXXXXX`); `ID/ARCH/BRANCH`
-  directories that an install interrupted before its first deploy left
-  empty (nothing inside a deployment is ever looked at); and old
-  deployments in `.removed` that no running app holds a lock on, which is
-  what flatpak itself does after most transactions.
-- The data of apps that are no longer installed in any installation
-  (`~/.var/app/ID` and per-user overrides) is **only listed** unless you
-  add `--delete-data`: it is your data. With `--delete-data` rpak deletes
-  it and resets each app's portal permissions with
-  `flatpak permission-reset ID`, as the fork's `flatpak clean --delete-data`
-  does; if that fails (no session bus, say) it prints a warning and goes
-  on. A `~/.var/app/ID` that is a symlink loses the link, not what it
-  points to, and no symlink inside is followed. This only happens when the
-  user installation is cleaned (not with only `--system` or
-  `--installation=NAME`), and never under sudo: `sudo rpak clean
-  --delete-data` lists the data and leaves it alone, whichever home
-  directory sudo left in `$HOME`.
-
-Without options it looks at the default system installation, the user
-installation and every installation configured in
-`/etc/flatpak/installations.d`. Each gets a heading with its path; what is
-removed is listed under it as it is found, a line per item grouped by kind,
-with paths relative to the installation. A line per installation says what
-it freed when there are several, and a total ends the output:
+Frees the installers cached in the repositories, leftovers of interrupted
+downloads and installs, and old deployments. The data of apps that are no
+longer installed (`~/.var/app/ID`, overrides) is only listed; add
+`--delete-data` to delete it.
 
 ```
 $ rpak clean
-System installation (default)  /var/lib/flatpak
-  Installers cached in commits
-       2.5 GB  com.example.Big  flathub
-  Would free 2.5 GB; run "sudo rpak clean --system"
-
 User installation  ~/.local/share/flatpak
   Installers cached in commits
-      11.2 MB  app.audionaut.Audionaut  deployed
-  Repository leftovers
-            -  repo/refs: 4 empty directories
-  rpak's prefetch directories
-      13.9 MB  extra-data/3f2a9c0e4b5d6a7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7
-  Freed 25.2 MB
+     144.8 MB  com.google.Chrome  deployed
+  Freed 144.8 MB
 
-Data of apps that are no longer installed
-     126.2 MB  com.example.Old  ~/.var/app, overrides
-  Kept 126.2 MB; "rpak clean --delete-data" deletes it
-
-Freed 25.2 MB (3 items)
+Freed 144.8 MB (1 item)
 ```
 
-A commit is shown by the app or runtime its ref names, with the remote it
-is from, `deployed` for the ref flatpak keeps for the deployed commit, or
-`no ref` and the start of its checksum. On a terminal lines are cut to its
-width (names in the middle), and colours are used as for install and update;
-in a pipe every line is whole and plain.
+### Environment
 
-A system installation you cannot write to is only inspected, like above; one
-you name explicitly (`--system`) is an error then. `--dry-run` only reports
-and changes nothing at all, not even lock files; with `--delete-data` it
-counts the data of apps in the total, an item per app. `-v` also lists
-what is kept and why. `rpak clean` exits with 1 if an installation, or
-the data of an app, could not be cleaned (busy, not writable, an I/O
-error), 2 for a usage error.
+| Variable | |
+|---|---|
+| `RPAK_JOBS=N` | concurrent downloads, 1–16, default 4 |
+| `RPAK_DRY_RUN=1` | show the plan and the flatpak command, run nothing |
+| `RPAK_FLATPAK=PATH` | flatpak to run (default: `flatpak` from `PATH`) |
 
-How it works, and why it is safe:
+## Shell completion
 
-- The detached metadata is a GVariant `a{sv}`. rpak reads its framing
-  (following GLib's `gvariant-serialiser.c`), drops the `xa.extra-data`
-  entry and writes the others back unchanged with new framing. The result is
-  byte for byte what GLib would serialise for the same dictionary without
-  that key; the test suite checks this against fixtures that GLib made,
-  including a real commitmeta. A file that is not in GVariant normal form,
-  or anything else rpak is not sure about, is left alone with a warning. The
-  new file is written next to the old one, synced, given the old one's
-  permissions and renamed over it. The installers are memory-mapped, not
-  read.
-- While changing a repository, rpak holds the same two locks as `flatpak
-  clean` of FlatPark's flatpak fork, without waiting for either: ostree's
-  repository lock `repo/.lock`, and flatpak's `repo-lock`, both exclusive.
-  They are OFD locks (`fcntl(F_OFD_SETLK)`) like the ones libglnx and ostree
-  take, so they really exclude a running flatpak; `flock()` would not see
-  them. Pulls and deploys hold both shared.
-- The rules for leftovers are those of `flatpak clean` in
-  [FlatPark's flatpak fork](https://github.com/flatpark/flatpak), which does
-  the same in C; items even come in the same order. rpak works with the
-  stock flatpak of your distribution. `test/compare-fork.sh` runs both on
-  the same throwaway installation, shows their output and diffs what each
-  left behind.
+```sh
+source <(rpak completion zsh)     # ~/.zshrc, after compinit
+source <(rpak completion bash)    # ~/.bashrc
+rpak completion fish > ~/.config/fish/completions/rpak.fish
+```
+
+rpak's own commands are completed by rpak, everything else by flatpak.
 
 ## Limitations
 
-- Only commands run through rpak prefetch anything. GUI stores (GNOME
-  Software, KDE Discover) and background automatic updates call flatpak
-  directly.
-- rpak prefetches only the refs named on the command line, or listed as
-  pending updates by `update`. Refs that the transaction pulls in on its own
-  (dependencies, related refs such as a newly added extra-data extension) are
-  downloaded serially by flatpak as usual.
-- Nothing is prefetched with `--no-pull`, `--commit`, `--bundle`, `--from`,
-  `--image`, `--sideload-repo` or `--appstream`, or when installing from a
-  file or URL.
-- flatpak reads the whole local file into memory. It does the same with the
-  files it downloads itself.
-- Without installation options, `update` looks at the user installation and
-  the default system installation only. Other system installations are only
-  covered when named with `--installation=`.
-- Files are not locked while flatpak reads them. If two rpak runs install the
-  same app at the same time, the worst case is that one misses and flatpak
-  downloads that file itself.
-- Installs and updates that do not go through rpak keep adding installers to
-  the repository until the next `rpak install`, `rpak update` or
-  `rpak clean`.
-- A commit stripped of `xa.extra-data` cannot be deployed again without
-  downloading: `flatpak install --no-pull` or `flatpak update --no-pull` of
-  that same commit fails, a normal install or update downloads the
-  installers again.
-- `rpak clean` does not remove `-origin` remotes of uninstalled bundles.
-- In interactive mode, a line you type ahead, before flatpak asks, is held
-  back like an answer, and the progress block may then show between lines
-  of flatpak's. Lines typed while rpak holds an answer wait their turn,
-  but the terminal echoes them, which can leave part of the block on the
-  screen. Any answer but `n`/`no` waits, the number of a choice included.
-- rpak checks for authenticators in the remotes as they are configured
-  when it starts. A remote that gets one during the run, from a
-  `.flatpakrepo` in `remotes.d` or from its summary, is not noticed.
+- GUI stores and automatic updates call flatpak directly, so they get
+  neither parallel downloads nor cleanup; `rpak clean` frees what they
+  leave.
+- Only apps named on the command line, or pending updates, are downloaded
+  ahead; dependencies the transaction adds are left to flatpak.
+- After rpak frees a commit's cached installers, `--no-pull` cannot deploy
+  that commit again.
 
 ## Development
 
 ```sh
-make lint test build   # go vet, gofmt, unit tests, ./rpak
-make e2e               # end-to-end test, needs podman and network access
+make lint test build   # ./rpak
+make e2e               # end-to-end test in podman (cached, about a minute)
 ```
-
-`make e2e` runs `test/e2e/in-container.sh` against the stock flatpak of
-Debian trixie in a container (`--privileged`, for bubblewrap). It installs
-FlatPark extra-data apps with plain flatpak and with rpak, publishes a local
-app to test `rpak update`, and checks `rpak clean`. The log is in
-`test/e2e/out/e2e.log`.
-
-Two things are cached between runs:
-
-- the image built from `test/e2e/Containerfile`, tagged
-  `localhost/rpak-e2e:<hash>` with a hash of that file and the base image
-  (`RPAK_E2E_IMAGE`, default `debian:trixie`); changing either builds a new
-  one;
-- the podman volume `rpak-e2e-runtime`, mounted as the system installation
-  (`/var/lib/flatpak`). It holds only the runtime of the test apps,
-  downloaded on the first run (a few hundred MB) and checked for updates on
-  every run after that; a failed update is a warning. The test mounts it
-  read-only and checks that it did not change.
-
-The apps go `--user` into a fresh directory in the container and are
-discarded with it, and their extra-data are downloaded on every run, so
-that the downloads really run in parallel. With the cache in place, a run
-takes a minute or two.
-
-```sh
-E2E_FRESH=1 make e2e   # build the image and install the runtime from scratch,
-                       # in a throwaway image and volume
-make e2e-clean         # remove the cached image(s) and the volume
-```
-
-Runs can go side by side. A lock in `$XDG_RUNTIME_DIR` (or `/tmp`) makes
-building the image and updating the runtime wait while another run is
-testing, and `make e2e-clean` wait until no run is using the cache.
