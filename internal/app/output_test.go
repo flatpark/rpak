@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -245,27 +244,14 @@ func TestSummaryLine(t *testing.T) {
 	}
 }
 
-// openPTY returns the terminal side of a new pseudo-terminal of cols × rows.
-func openPTY(t *testing.T, cols, rows int) *os.File {
+// testPTY returns the terminal side of a new pseudo-terminal of cols × rows.
+func testPTY(t *testing.T, cols, rows int) *os.File {
 	t.Helper()
-	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	master, pts, err := openPTY()
 	if err != nil {
 		t.Skipf("no pseudo-terminals: %v", err)
 	}
-	t.Cleanup(func() { ptmx.Close() })
-	var unlock int32
-	var n uint32
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), syscall.TIOCSPTLCK, uintptr(unsafe.Pointer(&unlock))); errno != 0 {
-		t.Skipf("unlockpt: %v", errno)
-	}
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), syscall.TIOCGPTN, uintptr(unsafe.Pointer(&n))); errno != 0 {
-		t.Skipf("ptsname: %v", errno)
-	}
-	pts, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		t.Skipf("opening the pseudo-terminal: %v", err)
-	}
-	t.Cleanup(func() { pts.Close() })
+	t.Cleanup(func() { master.Close(); pts.Close() })
 	ws := struct{ Row, Col, X, Y uint16 }{uint16(rows), uint16(cols), 0, 0}
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, pts.Fd(), syscall.TIOCSWINSZ, uintptr(unsafe.Pointer(&ws))); errno != 0 {
 		t.Fatalf("setting the size: %v", errno)
@@ -274,7 +260,7 @@ func openPTY(t *testing.T, cols, rows int) *os.File {
 }
 
 func TestDetectTerm(t *testing.T) {
-	pts := openPTY(t, 77, 11)
+	pts := testPTY(t, 77, 11)
 	for _, c := range []struct {
 		term, noColor string
 		redraw, color bool
