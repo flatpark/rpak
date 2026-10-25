@@ -277,3 +277,59 @@ rpak: prefetch done: 2 ready (1 downloaded, 1 reused), 2 skipped/failed, 210.0 M
 		}
 	}
 }
+
+// TestProgressTransient: in interactive mode nothing shows until show, and
+// nothing stays on screen after finish.
+func TestProgressTransient(t *testing.T) {
+	sources := testSources()
+	f := newFakeRun(t, term{tty: true, redraw: true, cols: 100, rows: 30}, sources)
+	f.r.quiet, f.r.transient = true, true
+	startTestRun(f, sources)
+	if raw := f.scr.raw.String(); raw != "" {
+		t.Fatalf("output while quiet: %q", raw)
+	}
+
+	if !f.r.show() {
+		t.Fatal("show reports the downloads ended")
+	}
+	want := `    app.deb                         ███▍                   17%   36.0 / 210.0 MB    6.0 MB/s  00:29
+    Vendor-Collaboration….AppImage  ██                     10%   12.0 / 120.0 MB    2.0 MB/s  00:54
+    Total 2/4                       ███▍                   16%   57.3 / 339.3 MB    8.2 MB/s  00:34`
+	if got := f.scr.text(); got != want {
+		t.Errorf("shown:\n%s\nwant:\n%s", got, want)
+	}
+
+	// A file that is done leaves no line.
+	f.advance(time.Second, map[string]int64{sources[0].Name: 6_000_000, sources[1].Name: 2_000_000})
+	f.r.done(sources[1], prefetch.Result{Status: prefetch.Downloaded})
+	if got := f.scr.text(); strings.Contains(got, "✓") || !strings.Contains(got, "Total 3/4") {
+		t.Errorf("after a file is done:\n%s", got)
+	}
+	f.r.done(sources[0], prefetch.Result{Status: prefetch.Downloaded})
+	s := prefetch.Summary{Downloaded: 2, Reused: 1, Failed: 1}
+	f.r.finish(s, false, 7*time.Second)
+	if got := f.scr.text(); got != "" {
+		t.Errorf("left on screen:\n%s", got)
+	}
+	if f.r.show() {
+		t.Error("show after finish")
+	}
+	if got := f.r.summary(s).render(false); got != "rpak: prefetch done: 3 ready (2 downloaded, 1 reused), 1 skipped/failed, 58.0 MB in 7.0s" {
+		t.Errorf("summary %q", got)
+	}
+}
+
+// TestProgressQuietToTheEnd: a reporter never shown writes nothing.
+func TestProgressQuietToTheEnd(t *testing.T) {
+	sources := testSources()
+	for _, tm := range []term{{tty: true, redraw: true, cols: 100, rows: 30}, {}} {
+		f := newFakeRun(t, tm, sources)
+		f.r.quiet, f.r.transient = true, true
+		startTestRun(f, sources)
+		f.advance(15*time.Second, nil)
+		f.r.finish(prefetch.Summary{}, false, time.Second)
+		if raw := f.scr.raw.String(); raw != "" {
+			t.Errorf("%+v: output %q", tm, raw)
+		}
+	}
+}

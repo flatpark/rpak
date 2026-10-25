@@ -79,7 +79,17 @@ type reporter struct {
 	// that do not change width as downloads come and go.
 	nameWidth, sizesWidth int
 
+	// In interactive mode (interactive.go) the terminal belongs to flatpak:
+	// the reporter is quiet until show, then leaves nothing on screen, no
+	// lines for the files that are done and no summary, so that flatpak,
+	// which redraws its table relative to the cursor, finds the cursor
+	// where it was.
+	transient bool
+
 	mu          sync.Mutex
+	quiet       bool
+	ended       bool          // finish was called
+	elapsed     time.Duration // set by finish
 	finished    int
 	settled     int64 // sizes of the files that are done, whatever the outcome
 	transferred int64
@@ -145,7 +155,7 @@ func (r *reporter) started(s metadata.Source) {
 	a.rate.add(now, 0)
 	r.active[s.Checksum] = a
 	r.order = append(r.order, s.Checksum)
-	if !r.term.redraw {
+	if !r.term.redraw && !r.quiet {
 		r.printf("rpak: %s start %s (%s)\n", r.stamp(), a.name, host(s.URI))
 	}
 }
@@ -177,8 +187,15 @@ func (r *reporter) done(s metadata.Source, res prefetch.Result) {
 	}
 	r.finished++
 	r.settled += s.Size
+	if r.quiet {
+		return
+	}
 	if !r.term.redraw {
 		r.printf("rpak: %s %s\n", r.stamp(), r.event(s, res, a))
+		return
+	}
+	if r.transient {
+		r.drawLocked(nil, false)
 		return
 	}
 	// The line goes where the block was, and the block below it at once.
@@ -253,10 +270,19 @@ func (r *reporter) resultLine(s metadata.Source, res prefetch.Result, a *active)
 func (r *reporter) tick() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.quiet {
+		r.sampleLocked(r.now())
+		return
+	}
 	if r.term.redraw {
 		r.drawLocked(nil, false)
 		return
 	}
+	r.progressLineLocked()
+}
+
+// progressLineLocked prints the line-mode progress line.
+func (r *reporter) progressLineLocked() {
 	now := r.now()
 	r.sampleLocked(now)
 	if len(r.order) == 0 {
@@ -268,12 +294,16 @@ func (r *reporter) tick() {
 }
 
 // finish ends the output: the block is erased, and the summary follows
-// unless the downloads were interrupted.
+// unless the downloads were interrupted or the reporter is transient.
 func (r *reporter) finish(s prefetch.Summary, canceled bool, took time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.ended, r.elapsed = true, took
+	if r.quiet {
+		return
+	}
 	var lines []line
-	if !canceled {
+	if !canceled && !r.transient {
 		lines = []line{summaryLine(s, r.transferred, took), nil}
 	}
 	if r.term.redraw {
@@ -281,6 +311,32 @@ func (r *reporter) finish(s prefetch.Summary, canceled bool, took time.Duration)
 		return
 	}
 	writeLines(r.w, r.term, lines)
+}
+
+// show ends the quiet: from now on the progress is shown, at once. It
+// reports false, and changes nothing, if the downloads have ended.
+func (r *reporter) show() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ended {
+		return false
+	}
+	if r.quiet {
+		r.quiet = false
+		if r.term.redraw {
+			r.drawLocked(nil, false)
+		} else {
+			r.progressLineLocked()
+		}
+	}
+	return true
+}
+
+// summary is the summary line for s, once the downloads have ended.
+func (r *reporter) summary(s prefetch.Summary) line {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return summaryLine(s, r.transferred, r.elapsed)
 }
 
 func (r *reporter) printf(format string, a ...any) { fmt.Fprintf(r.w, format, a...) }
