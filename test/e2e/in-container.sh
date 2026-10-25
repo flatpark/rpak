@@ -92,7 +92,7 @@ pass "the dry run changed nothing"
 
 step "rpak clean --user"
 rpak clean --user | tee /tmp/clean.log
-grep -Eq "MB  (deploy/|flatpark:)app/$PLAIN/$arch/stable$" /tmp/clean.log || fail "no line for $PLAIN"
+grep -Eq "^ +[0-9.]+ (kB|MB|GB)  $PLAIN  (flatpark|deployed)$" /tmp/clean.log || fail "no line for $PLAIN"
 after=$(stat -c %s "$meta")
 echo "commitmeta: $before -> $after bytes"
 [ "$after" -lt $((before / 1000)) ] || fail "commitmeta did not shrink"
@@ -150,8 +150,8 @@ for kept in "$extra/$(hex 4)/app.deb" "$extra/$(hex 5)/.flatpak-prefetch" "$extr
 	[ -e "$kept" ] || fail "$kept was removed"
 done
 pass "kept: unmarked extra-data dir, flatpak's .flatpak-prefetch dir, other dot dirs, the deployment, live refs"
-grep -qx "0.3 MB  org.rpak.Gone  ~/.var/app  overrides" /tmp/clean.log || fail "data of org.rpak.Gone not listed"
-! grep -q "^[0-9.]* MB  $PLAIN" /tmp/clean.log || fail "data of the installed $PLAIN listed"
+grep -Eq '^ +3[0-9.]+ kB  org\.rpak\.Gone  ~/\.var/app, overrides$' /tmp/clean.log || fail "data of org.rpak.Gone not listed"
+! grep -q "  $PLAIN  ~/.var/app" /tmp/clean.log || fail "data of the installed $PLAIN listed"
 for kept in "$HOME/.var/app/org.rpak.Gone/data" "$FLATPAK_USER_DIR/overrides/org.rpak.Gone" "$HOME/.var/app/$PLAIN/rpak-test"; do
 	[ -e "$kept" ] || fail "$kept was removed"
 done
@@ -190,9 +190,10 @@ rpak install --user -y -v flatpark "${APPS[@]}" > /tmp/install.log 2>&1 || {
 	cat /tmp/install.log
 	fail "rpak install failed"
 }
-# rpak's own lines plus flatpak's extra-data lines; the full log is in /out.
+# rpak's own lines (with the plan table) plus flatpak's extra-data lines;
+# the full log is in /out.
 cp /tmp/install.log /out/install.log
-grep -E '^rpak|^  app/|extra-data|extra data' /tmp/install.log
+grep -E '^rpak|^  ID  |^  [^ ].*  [0-9.]+ (bytes|[kMGT]B)( |$)|extra-data|extra data' /tmp/install.log
 
 step "checks: install"
 for app in "${APPS[@]}"; do
@@ -216,7 +217,7 @@ leftover=$(find "$extra" -mindepth 1 2>/dev/null | head -5)
 [ -z "$leftover" ] || fail "left in $extra: $leftover"
 pass "nothing left in $extra after the successful install"
 
-grep -q '^rpak: freed [0-9.]* MB of cached extra-data$' /tmp/install.log || fail "no reclaim summary"
+grep -Eq '^rpak: freed [0-9.]+ (kB|MB|GB) of cached extra-data$' /tmp/install.log || fail "no reclaim summary"
 grep '^rpak: freed' /tmp/install.log
 for app in "${APPS[@]}"; do
 	c=$(flatpak info --user --show-commit "$app")
@@ -274,7 +275,7 @@ rpak update --user -y -v > /tmp/update.log 2>&1 || {
 	fail "rpak update failed"
 }
 cp /tmp/update.log /out/update.log
-grep -E '^rpak|^  app/|extra-data|extra data' /tmp/update.log
+grep -E '^rpak|^  ID  |^  [^ ].*  [0-9.]+ (bytes|[kMGT]B)( |$)|extra-data|extra data' /tmp/update.log
 
 step "checks: update"
 new=$(flatpak info --user --show-commit org.rpak.E2E)
@@ -287,7 +288,7 @@ cat "$FLATPAK_USER_DIR/app/org.rpak.E2E/current/active/files/extra/SHA256SUMS"
 leftover=$(find "$extra" -mindepth 1 2>/dev/null | head -5)
 [ -z "$leftover" ] || fail "left in $extra: $leftover"
 pass "nothing left in $extra after the successful update"
-grep -q '^rpak: freed [0-9.]* MB of cached extra-data$' /tmp/update.log || fail "no reclaim summary"
+grep -Eq '^rpak: freed [0-9.]+ (kB|MB|GB) of cached extra-data$' /tmp/update.log || fail "no reclaim summary"
 grep '^rpak: freed' /tmp/update.log
 # The local repository is not signed: only xa.extra-data was in there.
 keys "$new" > /tmp/keys
