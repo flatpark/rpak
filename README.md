@@ -97,6 +97,33 @@ rpak: prefetch done: 3 ready (3 downloaded, 0 reused), 0 skipped/failed, 41.6 MB
 ... flatpak's own output follows
 ```
 
+That is the order with `-y` (or `--assumeyes`, `--noninteractive`), or when
+stdin or stdout is not a terminal. Otherwise flatpak would ask its
+questions only after the downloads, so rpak asks them while it downloads:
+
+- flatpak starts as soon as rpak knows what to prefetch, and shows the
+  transaction and its question. The downloads run in the background and
+  print nothing; the plan table is not shown.
+- An answer that lets flatpak go ahead (Enter, `y`, ...) waits for the
+  downloads. Meanwhile the progress block shows below it; when the downloads
+  end it is erased and flatpak gets the answer. If they are done before you
+  answer, flatpak gets it at once and you see nothing of rpak.
+- `n` (or `no`) reaches flatpak at once. The downloads stop when flatpak
+  exits, and what was downloaded is kept for the next run.
+- The summary line follows flatpak's output.
+
+```
+Proceed with these changes to the system installation? [Y/n]: y
+    soundcraft.tar.gz  ███████████▏      74%  12.3 / 16.5 MB    1.2 MB/s  00:03
+    Total 2/3          █████████         60%  25.0 / 41.6 MB    2.6 MB/s  00:06
+```
+
+This interactive mode is also off with `TERM=dumb` (or no `TERM`), where
+the progress could not be erased, and when a remote of the installations
+involved has an authenticator (`xa.authenticator-name` in its
+configuration): flatpak may then ask for a password, and the terminal
+would show it as you type.
+
 If there is nothing to prefetch, rpak prints nothing and goes straight to
 flatpak. After flatpak, if it succeeded and there was space to free (see
 [Cleaning up](#cleaning-up)), rpak prints one more line:
@@ -181,6 +208,18 @@ What rpak does:
    terminal, and SIGINT/SIGTERM/SIGHUP are forwarded to it. rpak exits with
    flatpak's exit code, or 128+signal if flatpak was killed. When flatpak
    uses a local file, `-v` shows `Loading extra-data from local file ...`.
+
+   In interactive mode flatpak runs while step 3 is under way, with its
+   stdout and stderr on the terminal and its stdin on a pseudo-terminal of
+   rpak's (flatpak only asks when stdin is a terminal). The terminal still
+   echoes and edits what you type; rpak passes each line on, or holds it
+   back as described above. During the transaction flatpak puts its stdin
+   in raw mode and reads the terminal's replies to cursor position
+   queries; rpak then puts the terminal in raw mode too and passes bytes on
+   as they come, and restores the terminal's mode afterwards. When someone
+   else changes the terminal's mode to read from it, such as polkit's text
+   agent asking for a password on `/dev/tty`, rpak leaves the input to it
+   until the mode is back.
 5. If flatpak succeeds, rpak removes the marked directories it placed. If
    flatpak fails, or you answer "n" at its prompt, they are kept and the next
    attempt reuses them: they are verified again but not downloaded again. At
@@ -194,7 +233,10 @@ you typed, so the worst case is the same as running flatpak directly. A wrong
 path or name is just a miss, and flatpak downloads the file itself.
 
 Ctrl-C while prefetching stops all downloads and keeps the `.part` files.
-rpak then exits with 130 (143 for SIGTERM) without running flatpak.
+rpak then exits with 130 (143 for SIGTERM) without running flatpak. In
+interactive mode flatpak is already running and gets the Ctrl-C as well:
+rpak erases its progress, stops the downloads when flatpak exits, and exits
+with flatpak's code.
 
 ## Cleaning up
 
@@ -350,6 +392,14 @@ How it works, and why it is safe:
   that same commit fails, a normal install or update downloads the
   installers again.
 - `rpak clean` does not remove `-origin` remotes of uninstalled bundles.
+- In interactive mode, a line you type ahead, before flatpak asks, is held
+  back like an answer, and the progress block may then show between lines
+  of flatpak's. Lines typed while rpak holds an answer wait their turn,
+  but the terminal echoes them, which can leave part of the block on the
+  screen. Any answer but `n`/`no` waits, the number of a choice included.
+- rpak checks for authenticators in the remotes as they are configured
+  when it starts. A remote that gets one during the run, from a
+  `.flatpakrepo` in `remotes.d` or from its summary, is not noticed.
 
 ## Development
 
