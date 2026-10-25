@@ -255,27 +255,44 @@ rpak clean [--user | --system | --installation=NAME]... [--dry-run] [--delete-da
 
 Without options it looks at the default system installation, the user
 installation and every installation configured in
-`/etc/flatpak/installations.d`, with a heading for each. Each removed item
-gets a line, and a total ends the output:
+`/etc/flatpak/installations.d`. Each gets a heading with its path; what is
+removed is listed under it as it is found, a line per item grouped by kind,
+with paths relative to the installation. A line per installation says what
+it freed when there are several, and a total ends the output:
 
 ```
 $ rpak clean
-System installation (default):
-2410.3 MB  flathub:app/com.example.Big/x86_64/stable
-System installation (default): would free 2.5 GB; run "sudo rpak clean --system"
-User installation:
-10.7 MB  deploy/app/app.audionaut.Audionaut/x86_64/stable
-0.0 MB  /home/me/.local/share/flatpak/repo/refs: 4 empty directories
-Data of apps that are no longer installed:
-120.4 MB  com.example.Old  ~/.var/app  overrides
-Kept 126.2 MB; run "rpak clean --delete-data" to delete it
-Freed: 2 objects, 0.01 GB
+System installation (default)  /var/lib/flatpak
+  Installers cached in commits
+       2.5 GB  com.example.Big  flathub
+  Would free 2.5 GB; run "sudo rpak clean --system"
+
+User installation  ~/.local/share/flatpak
+  Installers cached in commits
+      11.2 MB  app.audionaut.Audionaut  deployed
+  Repository leftovers
+            -  repo/refs: 4 empty directories
+  rpak's prefetch directories
+      13.9 MB  extra-data/3f2a9c0e4b5d6a7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7
+  Freed 25.2 MB
+
+Data of apps that are no longer installed
+     126.2 MB  com.example.Old  ~/.var/app, overrides
+  Kept 126.2 MB; "rpak clean --delete-data" deletes it
+
+Freed 25.2 MB (3 items)
 ```
+
+A commit is shown by the app or runtime its ref names, with the remote it
+is from, `deployed` for the ref flatpak keeps for the deployed commit, or
+`no ref` and the start of its checksum. On a terminal lines are cut to its
+width (names in the middle), and colours are used as for install and update;
+in a pipe every line is whole and plain.
 
 A system installation you cannot write to is only inspected, like above; one
 you name explicitly (`--system`) is an error then. `--dry-run` only reports
 and changes nothing at all, not even lock files; with `--delete-data` it
-counts the data of apps in the total, an object per app. `-v` also lists
+counts the data of apps in the total, an item per app. `-v` also lists
 what is kept and why. `rpak clean` exits with 1 if an installation, or
 the data of an app, could not be cleaned (busy, not writable, an I/O
 error), 2 for a usage error.
@@ -298,11 +315,12 @@ How it works, and why it is safe:
   They are OFD locks (`fcntl(F_OFD_SETLK)`) like the ones libglnx and ostree
   take, so they really exclude a running flatpak; `flock()` would not see
   them. Pulls and deploys hold both shared.
-- The rules for leftovers, and the output, are those of `flatpak clean` in
+- The rules for leftovers are those of `flatpak clean` in
   [FlatPark's flatpak fork](https://github.com/flatpark/flatpak), which does
   the same in C; items even come in the same order. rpak works with the
   stock flatpak of your distribution. `test/compare-fork.sh` runs both on
-  the same throwaway installation and diffs their output.
+  the same throwaway installation, shows their output and diffs what each
+  left behind.
 
 ## Limitations
 
