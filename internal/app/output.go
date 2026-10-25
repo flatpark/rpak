@@ -153,8 +153,7 @@ func writeLines(w io.Writer, t term, lines []line) {
 }
 
 // humanSize formats a size as flatpak does (g_format_size): decimal
-// units, "412.3 MB". (clean.go's formatSize is the same; the two are to
-// be merged when the output of rpak clean is reworked.)
+// units, "412.3 MB", for all of rpak's output.
 func humanSize(n int64) string {
 	if n < 1000 {
 		if n == 1 {

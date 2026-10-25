@@ -44,8 +44,8 @@ func TestCleanDeleteDataUnderSudo(t *testing.T) {
 		if !strings.Contains(stderr.String(), `not deleting the data of apps under sudo; run "rpak clean --delete-data" without sudo`) {
 			t.Errorf("%q: stderr:\n%s", argv, stderr.String())
 		}
-		if !strings.Contains(stdout.String(), "org.example.Gone  ~/.var/app  overrides\nKept ") ||
-			!strings.Contains(stdout.String(), " 0 objects, ") {
+		if !strings.Contains(stdout.String(), "org.example.Gone  ~/.var/app, overrides\n  Kept ") ||
+			!strings.Contains(stdout.String(), "\n\nNothing ") {
 			t.Errorf("%q: output:\n%s", argv, stdout.String())
 		}
 	}

@@ -208,20 +208,22 @@ func TestCleanDryRunChangesNothing(t *testing.T) {
 	}
 	freed := len(fixture(t, "real.gvariant")) - len(fixture(t, "real.stripped.gvariant"))
 	for _, want := range []string{
-		"System installation (default):\n",
-		"User installation:\n",
-		fmt.Sprintf("%.1f MB  flatpark:app/org.example.App/x86_64/stable\n", float64(freed)/(1<<20)),
-		fmt.Sprintf("  %s\n", commitB[:12]),
-		"/repo/refs: 3 empty directories\n",
-		strings.Repeat("c", 64) + ".commitpartial\n",
-		"." + commitB + "-Xy12Zq\n",
-		"extra-data/" + strings.Repeat("d", 64) + "\n",
-		"Data of apps that are no longer installed:\n" +
-			"0.1 MB  org.example.Gone  ~/.var/app  overrides\n" +
-			"0.0 MB  org.example.OnlyOverride  overrides\n" +
-			"Kept ",
-		"; run \"rpak clean --delete-data\" to delete it\n",
-		"Would free: 11 objects, ",
+		"System installation (default)  " + e.sys + "\n  Installers cached in commits\n",
+		"User installation  " + e.base + "\n  Installers cached in commits\n",
+		fmt.Sprintf("\n       %.1f kB  org.example.App  flatpark\n", float64(freed)/1000),
+		fmt.Sprintf(" kB  commit %s  no ref\n", commitB[:12]),
+		"  Repository leftovers\n            -  repo/refs: 3 empty directories\n",
+		"            -  repo/state/" + strings.Repeat("c", 64) + ".commitpartial\n",
+		"  Interrupted installs and updates\n",
+		" kB  app/org.example.App/x86_64/stable/." + commitB + "-Xy12Zq\n",
+		"  rpak's prefetch directories\n",
+		" kB  extra-data/" + strings.Repeat("d", 64) + "\n",
+		"Data of apps that are no longer installed\n" +
+			"     106.5 kB  org.example.Gone  ~/.var/app, overrides\n" +
+			"            -  org.example.OnlyOverride  overrides\n" +
+			"  Kept 106.5 kB; \"rpak clean --delete-data\" deletes it\n",
+		"\n  Would free 127.1 kB\n\n",
+		"\n\nWould free 246.0 kB (11 items)\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("output lacks %q:\n%s", want, stdout)
@@ -276,9 +278,11 @@ func TestClean(t *testing.T) {
 			t.Errorf("%s removed", p)
 		}
 	}
-	// One installation: no headings. The app data is listed, not counted.
-	if strings.Contains(stdout, "installation:") || !strings.Contains(stdout, "Freed: 6 objects") ||
-		!strings.Contains(stdout, "org.example.Gone  ~/.var/app  overrides\n") || strings.Contains(stdout, "org.example.App ") {
+	// One installation: no line of its own before the total. The app data
+	// is listed, not counted.
+	if !strings.HasPrefix(stdout, "User installation  "+e.base+"\n") || strings.Contains(stdout, "\n  Freed") ||
+		!strings.HasSuffix(stdout, "\n\nFreed 127.1 kB (6 items)\n") ||
+		!strings.Contains(stdout, " kB  org.example.Gone  ~/.var/app, overrides\n") || strings.Contains(stdout, "org.example.App  ~") {
 		t.Errorf("output:\n%s", stdout)
 	}
 	if e.read("calls") != "" {
@@ -291,7 +295,7 @@ func TestClean(t *testing.T) {
 
 	// Nothing left the second time.
 	code, stdout, _ = e.runOut("clean", "-u")
-	if code != 0 || !strings.Contains(stdout, "Freed: 0 objects, 0.00 GB") {
+	if code != 0 || !strings.HasSuffix(stdout, "\n\nNothing freed\n") {
 		t.Errorf("second run: exit %d\n%s", code, stdout)
 	}
 }
@@ -346,19 +350,21 @@ func TestCleanDeleteData(t *testing.T) {
 	if got, want := e.read("permission-reset"), "permission-reset -- org.example.Gone\npermission-reset -- org.example.Linked\npermission-reset -- org.example.OnlyOverride\n"; got != want {
 		t.Errorf("permission-reset calls:\n%s\nwant\n%s", got, want)
 	}
-	// Each app is an object: 6 in the repository and extra-data, 3 apps.
+	// Each app is an item: 6 in the repository and extra-data, 3 apps.
 	for _, want := range []string{
-		"Data of apps that are no longer installed:\n" +
-			"0.1 MB  org.example.Gone  ~/.var/app  overrides\n" +
-			"0.0 MB  org.example.Linked  ~/.var/app  overrides\n" +
-			"0.0 MB  org.example.OnlyOverride  overrides\n" +
-			"Freed: 9 objects, ",
+		"Data of apps that are no longer installed\n" +
+			"     106.5 kB  org.example.Gone  ~/.var/app, overrides\n" +
+			"            -  org.example.Linked  ~/.var/app, overrides\n" +
+			"            -  org.example.OnlyOverride  overrides\n" +
+			"  Deleted 106.5 kB\n\n" +
+			"Freed ",
+		" (9 items)\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("output lacks %q:\n%s", want, stdout)
 		}
 	}
-	if strings.Contains(stdout, "Kept") || strings.Contains(stdout, "org.example.App ") {
+	if strings.Contains(stdout, "Kept") || strings.Contains(stdout, "org.example.App  ~") {
 		t.Errorf("output:\n%s", stdout)
 	}
 
@@ -387,8 +393,8 @@ func TestCleanDryRunDeleteData(t *testing.T) {
 		t.Errorf("flatpak was run: %s", e.read("calls"))
 	}
 	// Counted as it would be deleted; no "Kept" line.
-	if !strings.Contains(stdout, "0.1 MB  org.example.Gone  ~/.var/app  overrides\n") ||
-		!strings.Contains(stdout, "Would free: 3 objects, ") || strings.Contains(stdout, "Kept") {
+	if !strings.Contains(stdout, "     106.5 kB  org.example.Gone  ~/.var/app, overrides\n") || !strings.Contains(stdout, "  Would delete ") ||
+		!strings.Contains(stdout, " (3 items)\n") || !strings.Contains(stdout, "\nWould free ") || strings.Contains(stdout, "Kept") {
 		t.Errorf("output:\n%s", stdout)
 	}
 }
@@ -411,7 +417,7 @@ func TestCleanDeleteDataPermissionResetFails(t *testing.T) {
 	if _, err := os.Lstat(data[0]); err == nil {
 		t.Error("data not deleted")
 	}
-	if !strings.Contains(stdout, "Freed: 2 objects, ") {
+	if !strings.Contains(stdout, " (2 items)\n") {
 		t.Errorf("output:\n%s", stdout)
 	}
 }
@@ -441,7 +447,7 @@ func TestCleanDeleteDataFailure(t *testing.T) {
 	if got := e.read("permission-reset"); got != "permission-reset -- org.example.OnlyOverride\n" {
 		t.Errorf("permission-reset calls: %q", got)
 	}
-	if strings.Contains(stdout, "org.example.Gone") || !strings.Contains(stdout, "Freed: 1 objects, ") {
+	if strings.Contains(stdout, "org.example.Gone") || !strings.Contains(stdout, "  Deleted the data of 1 app\n\nRemoved 1 item\n") {
 		t.Errorf("output:\n%s", stdout)
 	}
 }
@@ -503,11 +509,11 @@ func TestCleanReadOnlySystem(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
 	}
-	if !strings.Contains(stdout, `System installation (default): would free 8.3 kB; run "sudo rpak clean --system"`) {
+	if !strings.Contains(stdout, "\n  Would free 8.3 kB; run \"sudo rpak clean --system\"\n") {
 		t.Errorf("output:\n%s", stdout)
 	}
 	// Not counted in the total of a real run.
-	if !strings.Contains(stdout, "Freed: 0 objects") {
+	if !strings.HasSuffix(stdout, "\n\nNothing freed\n") {
 		t.Errorf("output:\n%s", stdout)
 	}
 	if snapshot(t, e.sys) != before {
@@ -529,7 +535,7 @@ func TestCleanOtherInstallation(t *testing.T) {
 	meta := installation(t, extra)
 	put(t, filepath.Join(e.conf, "installations.d", "extra.conf"), []byte(fmt.Sprintf("[Installation \"extra\"]\nPath=%s\n", extra)))
 	code, stdout, stderr := e.runOut("clean", "--installation", "extra")
-	if code != 0 || !strings.Contains(stdout, "Freed: 2 objects") {
+	if code != 0 || !strings.HasSuffix(stdout, " (2 items)\n") {
 		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
 	}
 	if b, _ := os.ReadFile(meta); !bytes.Equal(b, fixture(t, "real.stripped.gvariant")) {
@@ -538,7 +544,7 @@ func TestCleanOtherInstallation(t *testing.T) {
 	// Included by default, with a heading.
 	installation(t, extra)
 	code, stdout, _ = e.runOut("clean", "--dry-run")
-	if code != 0 || !strings.Contains(stdout, "Installation system (extra):\n") {
+	if code != 0 || !strings.Contains(stdout, "Installation system (extra)  "+extra+"\n") {
 		t.Errorf("exit %d\n%s", code, stdout)
 	}
 	code, _, stderr = e.runOut("clean", "--installation=nope")
@@ -596,7 +602,7 @@ func TestReclaimAfterSuccess(t *testing.T) {
 			e.write("mode", "exit 0")
 			out = e.run(argv...)
 			freed := 2 * (len(fixture(t, "real.gvariant")) - len(fixture(t, "real.stripped.gvariant")))
-			want := fmt.Sprintf("rpak: freed %.1f MB of cached extra-data\n", float64(freed)/(1<<20))
+			want := fmt.Sprintf("rpak: freed %.1f kB of cached extra-data\n", float64(freed)/1000)
 			if out.code != 0 || !strings.HasSuffix(out.stderr, want) {
 				t.Fatalf("exit %d, want %q in\n%s", out.code, want, out.stderr)
 			}
@@ -682,7 +688,7 @@ func TestReclaimReadOnlySystemHint(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(filepath.Join(e.sys, "repo"), 0o755) })
 	out := e.run("update", "-y")
 	freed := 2 * (len(fixture(t, "real.gvariant")) - len(fixture(t, "real.stripped.gvariant")))
-	want := fmt.Sprintf("rpak: run \"sudo rpak clean --system\" to free %.1f MB of cached extra-data\n", float64(freed)/(1<<20))
+	want := fmt.Sprintf("rpak: run \"sudo rpak clean --system\" to free %.1f kB of cached extra-data\n", float64(freed)/1000)
 	if out.code != 0 || !strings.HasSuffix(out.stderr, want) {
 		t.Errorf("exit %d, want %q in\n%s", out.code, want, out.stderr)
 	}

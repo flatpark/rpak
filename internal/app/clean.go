@@ -121,37 +121,12 @@ func underSudo() bool {
 	return strings.HasSuffix(first, "rpak") || strings.HasSuffix(first, "flatpak")
 }
 
-// mb formats a size as flatpak clean's per-item lines do: MiB, called MB.
-func mb(size int64) string {
-	return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
-}
-
-// formatSize is g_format_size(): decimal units.
-func formatSize(size int64) string {
-	if size < 1000 {
-		if size == 1 {
-			return "1 byte"
-		}
-		return fmt.Sprintf("%d bytes", size)
-	}
-	value := float64(size)
-	for _, unit := range []string{"kB", "MB", "GB", "TB", "PB"} {
-		value /= 1000
-		if value < 1000 {
-			return fmt.Sprintf("%.1f %s", value, unit)
-		}
-	}
-	return fmt.Sprintf("%.1f EB", value/1000)
-}
-
 // sudoHint is the command that cleans a system installation as root.
 func sudoHint(inst installation.Installation) string {
 	return fmt.Sprintf(`sudo rpak clean %s`, inst.Option())
 }
 
-// cleanCommand is `rpak clean`; the output follows the fork's flatpak clean:
-// a heading per installation if there are several, a line per item, a line
-// for installations that could only be inspected, and a total.
+// cleanCommand is `rpak clean`; see clean_output.go for its output.
 func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 	opts, help, usageErr := parseCleanArgs(argv)
 	if help {
@@ -184,8 +159,9 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 		warn("%s", w)
 	}
 	explicit := len(opts.installations) > 0
-	showTitles := len(insts) > 1
-	item := func(size int64, what string) { fmt.Fprintf(stdout, "%s  %s\n", mb(size), what) }
+	several := len(insts) > 1
+	out := newCleanPrinter(stdout, opts.dryRun)
+	item := out.item
 
 	code := 0
 	var objects int
@@ -203,24 +179,21 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 			}
 			continue
 		}
-		if showTitles && (haveRepo || haveExtraData) {
-			fmt.Fprintf(stdout, "%s:\n", inst.Title())
+		if !haveRepo && !haveExtraData {
+			continue
 		}
-
+		out.installation(inst)
+		readOnly, failed := false, false
+		var wouldFree int64
 		if haveRepo {
 			c := &clean.Cleaner{DryRun: opts.dryRun, Item: item, Verbose: verbose, Warn: warn}
-			readOnly, err := cleanRepo(c, inst, explicit)
+			readOnly, err = cleanRepo(c, inst, explicit, out.section)
 			if err != nil {
 				errorf("%s: %v", inst.Title(), err)
 				code = 1
+				failed = true
 			} else {
-				if readOnly {
-					if inst.User {
-						fmt.Fprintf(stdout, "%s: would free %s; the repository is not writable\n", inst.Title(), formatSize(c.Freed))
-					} else {
-						fmt.Fprintf(stdout, "%s: would free %s; run \"%s\"\n", inst.Title(), formatSize(c.Freed), sudoHint(inst))
-					}
-				}
+				wouldFree = c.Freed
 				if opts.dryRun || !readOnly {
 					objects += c.Objects
 					freed += c.Freed
@@ -234,6 +207,7 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 		if inst.User && haveExtraData {
 			c := &clean.Cleaner{DryRun: opts.dryRun, Item: item, Verbose: verbose, Warn: warn}
 			release := func() {}
+			locked := true
 			if !opts.dryRun {
 				release, err = prefetch.TryLockExclusive(inst.Path)
 				if err != nil {
@@ -243,23 +217,35 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 						errorf("%v", err)
 						code = 1
 					}
-					continue
+					locked = false
 				}
 			}
-			c.PrefetchDirs(inst.Path)
-			release()
-			objects += c.Objects
-			freed += c.Freed
-			if c.Failed > 0 {
-				code = 1
+			if locked {
+				out.section(kindPath, "rpak's prefetch directories")
+				c.PrefetchDirs(inst.Path)
+				release()
+				objects += c.Objects
+				freed += c.Freed
+				if c.Failed > 0 {
+					code = 1
+				}
 			}
+		}
+		if failed {
+			out.failed()
+		} else if several || readOnly {
+			hint := "the repository is not writable"
+			if !inst.User {
+				hint = fmt.Sprintf("run \"%s\"", sudoHint(inst))
+			}
+			out.summary(readOnly, hint, wouldFree)
 		}
 	}
 
 	for _, inst := range insts {
 		if inst.User {
 			c := &clean.Cleaner{DryRun: opts.dryRun, Item: item, Warn: warn}
-			appData(c, inst.Path, opts.deleteData, stdout, warn)
+			appData(c, inst.Path, opts.deleteData, out, warn)
 			objects += c.Objects
 			freed += c.Freed
 			if c.Failed > 0 {
@@ -269,11 +255,7 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	verb := "Freed"
-	if opts.dryRun {
-		verb = "Would free"
-	}
-	fmt.Fprintf(stdout, "%s: %d objects, %.2f GB\n", verb, objects, float64(freed)/(1024*1024*1024))
+	out.total(objects, freed)
 	return code
 }
 
@@ -282,7 +264,7 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 // and resets the apps' permissions, counting each app as an object. Under
 // sudo it never deletes: the home directory may be root's or the user's,
 // and neither is what "sudo rpak clean" is for.
-func appData(c *clean.Cleaner, userBase string, deleteData bool, stdout io.Writer, warn func(string, ...any)) {
+func appData(c *clean.Cleaner, userBase string, deleteData bool, out *cleanPrinter, warn func(string, ...any)) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
@@ -299,19 +281,12 @@ func appData(c *clean.Cleaner, userBase string, deleteData bool, stdout io.Write
 		warn("not deleting the data of apps under sudo; run \"rpak clean --delete-data\" without sudo")
 		deleteData = false
 	}
-	fmt.Fprintln(stdout, "Data of apps that are no longer installed:")
+	out.apps()
 	var total int64
 	for _, a := range apps {
-		what := a.ID
-		if a.Data {
-			what += "  ~/.var/app"
-		}
-		if a.Override {
-			what += "  overrides"
-		}
 		total += a.Size
 		if !deleteData {
-			fmt.Fprintf(stdout, "%s  %s\n", mb(a.Size), what)
+			out.app(a)
 			continue
 		}
 		if !c.DryRun {
@@ -326,10 +301,12 @@ func appData(c *clean.Cleaner, userBase string, deleteData bool, stdout io.Write
 		}
 		c.Objects++
 		c.Freed += a.Size
-		c.Item(a.Size, what)
+		out.app(a)
 	}
 	if !deleteData {
-		fmt.Fprintf(stdout, "Kept %s; run \"rpak clean --delete-data\" to delete it\n", formatSize(total))
+		out.kept(total)
+	} else {
+		out.deleted()
 	}
 }
 
@@ -353,10 +330,10 @@ func resetPermissions(id string) error {
 }
 
 // cleanRepo is clean_repo(): checks that the repository may be changed,
-// locks it, and runs a. and c. on it. A repository that is not writable is
-// only inspected, as a dry run, unless the installation was asked for
-// explicitly, which is an error.
-func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool) (readOnly bool, err error) {
+// locks it, and runs a. and c. on it, telling section which one runs. A
+// repository that is not writable is only inspected, as a dry run, unless
+// the installation was asked for explicitly, which is an error.
+func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool, section func(cleanKind, string)) (readOnly bool, err error) {
 	repo := filepath.Join(inst.Path, "repo")
 	if !clean.Writable(inst.Path) {
 		if explicit {
@@ -373,9 +350,13 @@ func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool) 
 		}
 		defer release()
 	}
+	section(kindCommit, "Installers cached in commits")
 	c.StripExtraData(repo)
+	section(kindPath, "Repository leftovers")
 	c.RepoLeftovers(repo)
+	section(kindPath, "Interrupted installs and updates")
 	c.InterruptedDeploys(inst.Path)
+	section(kindPath, "Old deployments no longer in use")
 	c.Removed(inst.Path)
 	return readOnly, nil
 }
@@ -403,7 +384,7 @@ func reclaim(options []string, stderr io.Writer) {
 			c := &clean.Cleaner{DryRun: true}
 			c.StripExtraData(filepath.Join(inst.Path, "repo"))
 			if c.Freed > 0 {
-				fmt.Fprintf(stderr, "rpak: run \"%s\" to free %s of cached extra-data\n", sudoHint(inst), mb(c.Freed))
+				fmt.Fprintf(stderr, "rpak: run \"%s\" to free %s of cached extra-data\n", sudoHint(inst), humanSize(c.Freed))
 			}
 			continue
 		}
@@ -422,6 +403,6 @@ func reclaim(options []string, stderr io.Writer) {
 		freed += c.Freed
 	}
 	if freed > 0 {
-		fmt.Fprintf(stderr, "rpak: freed %s of cached extra-data\n", mb(freed))
+		fmt.Fprintf(stderr, "rpak: freed %s of cached extra-data\n", humanSize(freed))
 	}
 }
