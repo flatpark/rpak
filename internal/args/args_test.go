@@ -203,3 +203,26 @@ func TestSplitInstallRemote(t *testing.T) {
 		}
 	}
 }
+
+func TestAssumeYes(t *testing.T) {
+	for _, c := range []struct {
+		command string
+		argv    []string
+		want    bool
+	}{
+		{"install", []string{"flathub", "org.example.App"}, false},
+		{"install", []string{"-y", "flathub", "org.example.App"}, true},
+		{"update", []string{"-uy"}, true},
+		{"update", []string{"-vyu"}, true},
+		{"update", []string{"--assumeyes"}, true},
+		{"install", []string{"--noninteractive", "app"}, true},
+		{"update", []string{"--user", "-v"}, false},
+		// After "--" it is an argument, and "--yes" is not an option of flatpak.
+		{"install", []string{"app", "--", "-y"}, false},
+		{"install", []string{"--yes", "app"}, false},
+	} {
+		if got := Parse(c.command, c.argv).AssumeYes; got != c.want {
+			t.Errorf("%s %q: AssumeYes = %v, want %v", c.command, c.argv, got, c.want)
+		}
+	}
+}

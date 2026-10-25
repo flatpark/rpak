@@ -31,6 +31,9 @@ type Parsed struct {
 	// "flatpak install/update --no-pull" deploys from the repository, so
 	// the extra-data in it must stay.
 	NoDeploy bool
+	// AssumeYes reports -y, --assumeyes or --noninteractive: flatpak asks
+	// no questions.
+	AssumeYes bool
 	// Unknown lists options this parser does not know; they are treated as
 	// flags without a value.
 	Unknown []string
@@ -130,6 +133,8 @@ func Parse(command string, argv []string) Parsed {
 				p.Arch = value
 			case "--no-deploy":
 				p.NoDeploy = true
+			case "--assumeyes", "--noninteractive":
+				p.AssumeYes = true
 			}
 			if !values[name] && !flags[name] && !globalFlags[name] {
 				unknown(name)
@@ -139,6 +144,9 @@ func Parse(command string, argv []string) Parsed {
 			for _, c := range arg[1:] {
 				if c == 'u' {
 					p.addInstallation(User)
+				}
+				if c == 'y' {
+					p.AssumeYes = true
 				}
 				if c == '?' || c == 'h' {
 					skip("--help")
