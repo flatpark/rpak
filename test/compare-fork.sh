@@ -1,7 +1,9 @@
 #!/bin/bash
 # Runs FlatPark's flatpak fork (flatpak clean) and rpak clean on the same
-# synthetic installation in a temporary directory and shows both outputs
-# side by side. Needs the fork as $FORK_FLATPAK (default: flatpak) and
+# synthetic installation in a temporary directory, shows both outputs one
+# after the other and diffs what each left behind; the outputs themselves
+# differ, rpak's being laid out its own way. Needs the fork as
+# $FORK_FLATPAK (default: flatpak) and
 # ostree. Nothing outside the temporary directory is touched: HOME and all
 # FLATPAK_* locations point into it.
 #
@@ -57,7 +59,5 @@ echo "=== flatpak clean --user $*          (fork)"
 cat "$work/fork.out"
 echo "=== rpak clean --user $*"
 cat "$work/rpak.out"
-echo "=== diff of the outputs"
-diff "$work/fork.out" "$work/rpak.out" && echo "(identical)"
 echo "=== diff of what is left afterwards"
 diff "$work/fork.left" "$work/rpak.left" && echo "(identical)"
