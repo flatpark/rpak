@@ -1,0 +1,35 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make lint test build GO=go GOFMT=gofmt
+      - run: go test -race ./...
+
+  # The end-to-end test downloads a runtime and several extra-data apps
+  # (several hundred MB), so it does not run on pull requests.
+  e2e:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make e2e GO=go
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-log
+          path: test/e2e/out/e2e.log
