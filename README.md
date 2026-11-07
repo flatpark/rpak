@@ -103,3 +103,7 @@ rpak's own commands are completed by rpak, everything else by flatpak.
 make lint test build   # ./rpak
 make e2e               # end-to-end test in podman (cached, about a minute)
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
