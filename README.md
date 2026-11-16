@@ -13,7 +13,7 @@ and option, and adds two things:
 ## Installation
 
 ```sh
-curl -Lo ~/.local/bin/rpak https://github.com/flatpark/rpak/releases/latest/download/rpak-linux-amd64   # aarch64: rpak-linux-arm64
+curl -Lo ~/.local/bin/rpak "https://github.com/flatpark/rpak/releases/latest/download/rpak-linux-$(uname -m)"
 chmod +x ~/.local/bin/rpak
 ```
 

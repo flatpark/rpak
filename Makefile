@@ -25,7 +25,11 @@ build-amd64:
 build-arm64:
 	GOOS=linux GOARCH=arm64 $(BUILD) -o dist/rpak-linux-arm64 ./cmd/rpak
 
+# The same binaries again under `uname -m` names, so that one download
+# command works on either architecture: rpak-linux-$(uname -m).
 dist: build-amd64 build-arm64
+	cp dist/rpak-linux-amd64 dist/rpak-linux-x86_64
+	cp dist/rpak-linux-arm64 dist/rpak-linux-aarch64
 
 # End-to-end test with the distribution's flatpak in a debian:trixie
 # container (podman). The image and the runtime are cached (several hundred
