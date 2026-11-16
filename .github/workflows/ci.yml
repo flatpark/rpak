@@ -17,9 +17,9 @@ jobs:
       - run: go test -race ./...
 
   # The end-to-end test downloads a runtime and several extra-data apps
-  # (several hundred MB), so it does not run on pull requests.
+  # (several hundred MB, a few minutes). It runs on pull requests too, so
+  # that a change is tested before it is merged, not after.
   e2e:
-    if: github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
     steps:
