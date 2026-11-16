@@ -19,7 +19,8 @@
 //     again; an exclusive holder unlinks the file when releasing it. Pulls
 //     and deploys hold it shared, prune exclusively.
 //
-// Only non-blocking exclusive locks are needed here.
+// Only non-blocking exclusive locks are needed here, and Probe, which
+// asks whether one could be taken without taking it.
 package lock
 
 import (
@@ -134,4 +135,33 @@ func retryEINTR(f func() error) error {
 			return err
 		}
 	}
+}
+
+// Probe reports whether someone holds a lock on the file at path that an
+// exclusive lock would conflict with, without taking any lock or creating
+// the file: F_OFD_GETLK for a write lock over the whole file, on a
+// read-only descriptor. A missing file is not locked. pid is the holder's
+// for a classic POSIX lock and -1 for an OFD lock, whose holder the kernel
+// does not name. flock() locks, which flatpak only falls back to on
+// kernels without OFD locks, are not seen.
+func Probe(path string) (busy bool, pid int, err error) {
+	fd, err := openRetry(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("opening lock file %s: %w", path, err)
+	}
+	// Closing a descriptor drops the process's classic POSIX locks on the
+	// file; rpak never holds any, and OFD locks belong to their own
+	// descriptions, so this releases nothing.
+	defer unix.Close(fd)
+	fl := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 0}
+	if err := retryEINTR(func() error { return unix.FcntlFlock(uintptr(fd), unix.F_OFD_GETLK, &fl) }); err != nil {
+		return false, 0, fmt.Errorf("probing lock file %s: %w", path, err)
+	}
+	if fl.Type == unix.F_UNLCK {
+		return false, 0, nil
+	}
+	return true, int(fl.Pid), nil
 }

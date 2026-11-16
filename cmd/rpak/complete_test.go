@@ -50,7 +50,7 @@ func TestCompleteCommandNames(t *testing.T) {
 	e := newEnv(t)
 	e.write("complete-out", "install \nupdate \nlist \n")
 	out, code := e.complete(nil, "rpak ", "5", "")
-	if code != 0 || out != "install \nupdate \nlist \nclean \ncompletion \n" {
+	if code != 0 || out != "install \nupdate \nlist \nclean \ncompletion \ndoctor \n" {
 		t.Errorf("exit %d, output %q", code, out)
 	}
 	if got, want := e.completeArgv(), []string{"flatpak ", "8", ""}; !slices.Equal(got, want) {
@@ -79,12 +79,74 @@ func TestCompleteCommandNamesWithoutFlatpak(t *testing.T) {
 	e := newEnv(t)
 	for _, flatpak := range []string{filepath.Join(e.fake, "missing"), "false"} {
 		env := []string{"RPAK_FLATPAK=" + flatpak}
-		if out, code := e.complete(env, "rpak ", "5", ""); code != 0 || out != "install \nupdate \nclean \ncompletion \n" {
+		if out, code := e.complete(env, "rpak ", "5", ""); code != 0 || out != "install \nupdate \nclean \ncompletion \ndoctor \n" {
 			t.Errorf("%s: exit %d, output %q", flatpak, code, out)
 		}
 		if out, _ := e.complete(env, "rpak up", "7", "up"); out != "update \n" {
 			t.Errorf("%s: output %q", flatpak, out)
 		}
+	}
+}
+
+// rpak doctor completes app ids as "flatpak run" does: flatpak gets a line
+// with the current word alone.
+func TestCompleteDoctor(t *testing.T) {
+	e := newEnv(t)
+	e.write("complete-out", "--verbose \n--arch=\norg.a.App \norg.b.App \ncom.c.App \n")
+	for _, c := range []struct {
+		argv []string
+		want string
+		// what flatpak got: LINE POINT CUR
+		flatpak []string
+	}{
+		{[]string{"rpak doctor ", "12", ""}, "org.a.App \norg.b.App \ncom.c.App \n", []string{"flatpak run ", "12", ""}},
+		{[]string{"rpak -v doctor org", "18", "org"}, "org.a.App \norg.b.App \ncom.c.App \n", []string{"flatpak run org", "15", "org"}},
+		// Every argument is an id; those already given are not offered.
+		{[]string{"rpak doctor org.a.App com.c.App o", "33", "o"}, "org.b.App \n", []string{"flatpak run o", "13", "o"}},
+		// The cursor in the middle of the line: only the word under it.
+		{[]string{"rpak doctor org.b.App  org.a.App", "22", ""}, "org.a.App \ncom.c.App \n", []string{"flatpak run ", "12", ""}},
+		// Characters, not bytes, before the word; flatpak counts bytes.
+		{[]string{"rpak doctor 'é' or", "18", "or"}, "org.a.App \norg.b.App \ncom.c.App \n", []string{"flatpak run or", "14", "or"}},
+		// bash splits the word at "=": the shell's word is passed on.
+		{[]string{"rpak doctor x=org", "17", "org"}, "org.a.App \norg.b.App \ncom.c.App \n", []string{"flatpak run x=org", "17", "org"}},
+	} {
+		os.Remove(filepath.Join(e.fake, "complete-argv"))
+		out, code := e.complete(nil, c.argv...)
+		if code != 0 || out != c.want {
+			t.Errorf("%q: exit %d, output %q, want %q", c.argv, code, out, c.want)
+		}
+		if got := e.completeArgv(); !slices.Equal(got, c.flatpak) {
+			t.Errorf("%q: flatpak got %q, want %q", c.argv, got, c.flatpak)
+		}
+	}
+
+	// With bash's split, "x=org.a.App" given before is the candidate
+	// "org.a.App " for the word "x=or".
+	if out, _ := e.complete(nil, "rpak doctor x=org.a.App x=or", "28", "or"); out != "org.b.App \ncom.c.App \n" {
+		t.Errorf("output %q", out)
+	}
+
+	// Options: only --help, and flatpak is not asked.
+	for _, argv := range [][]string{{"rpak doctor -", "13", "-"}, {"rpak doctor org.a.App --h", "25", "--h"}} {
+		os.Remove(filepath.Join(e.fake, "complete-argv"))
+		if out, code := e.complete(nil, argv...); code != 0 || out != "--help \n" {
+			t.Errorf("%q: exit %d, output %q", argv, code, out)
+		}
+		if e.read("complete-argv") != "" {
+			t.Errorf("%q: flatpak was asked", argv)
+		}
+	}
+	if out, _ := e.complete(nil, "rpak doctor --x", "15", "--x"); out != "" {
+		t.Errorf("--x: output %q", out)
+	}
+
+	// flatpak fails: nothing, and nothing on stderr (e.complete checks).
+	e.write("complete-exit", "1")
+	if out, code := e.complete(nil, "rpak doctor ", "12", ""); code != 0 || out != "" {
+		t.Errorf("failing flatpak: exit %d, output %q", code, out)
+	}
+	if out, code := e.complete([]string{"RPAK_FLATPAK=" + filepath.Join(e.fake, "missing")}, "rpak doctor ", "12", ""); code != 0 || out != "" {
+		t.Errorf("no flatpak: exit %d, output %q", code, out)
 	}
 }
 

@@ -69,6 +69,38 @@ User installation  ~/.local/share/flatpak
 Freed 144.8 MB (1 item)
 ```
 
+### doctor
+
+```
+rpak doctor [APP_ID]...
+```
+
+Collects what is needed to look into a problem: rpak, flatpak, the
+distribution and kernel, the environment variables that matter, user
+namespaces, portals and GL drivers, every installation with its remotes,
+locks, free space and overrides, the extra-data directory, and whether the
+remotes can be reached. With app ids, also where each app is installed,
+its runtime, permissions and overrides, and whether its extra-data files
+can be downloaded: those of the installed commit and of the one the
+remote has now, or for an app that is not installed, of the remotes that
+have it. What looks wrong is marked `!` or `✗` and summed up at the end
+with what to do about it.
+
+When you report a problem, paste the whole output into the issue. Home
+directories and user names are replaced, passwords in proxy URLs hidden,
+and the files shared with an app are only counted. doctor only reads; it
+needs the network and takes a few seconds.
+
+```
+$ rpak doctor com.google.Chrome
+...
+== App com.google.Chrome
+User installation
+✓ runtime org.freedesktop.Platform/x86_64/26.08 is installed (User installation)
+✓ extra-data chrome.deb  https://dl.google.com/...  HTTP 200, 147.5 MB as pinned (installed and remote commit)
+...
+```
+
 ### Environment
 
 | Variable | |

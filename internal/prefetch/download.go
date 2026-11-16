@@ -75,6 +75,29 @@ func NewHTTPClient() *http.Client {
 	}}
 }
 
+// UserAgent is the User-Agent of every request rpak makes.
+func UserAgent(version string) string { return "rpak/" + version }
+
+// DefaultJobs and MaxJobs bound RPAK_JOBS, the number of concurrent
+// downloads.
+const (
+	DefaultJobs = 4
+	MaxJobs     = 16
+)
+
+// ParseJobs reads RPAK_JOBS: an empty value is DefaultJobs; anything that
+// is not a number from 1 to MaxJobs is DefaultJobs too, and not ok.
+func ParseJobs(v string) (n int, ok bool) {
+	if v == "" {
+		return DefaultJobs, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > MaxJobs {
+		return DefaultJobs, false
+	}
+	return n, true
+}
+
 // Status is what happened to one source.
 type Status int
 
@@ -376,7 +399,7 @@ func (d *Downloader) attempt(ctx context.Context, s metadata.Source, part string
 	if err != nil {
 		return &fatalError{err}
 	}
-	req.Header.Set("User-Agent", "rpak/"+d.cfg.Version)
+	req.Header.Set("User-Agent", UserAgent(d.cfg.Version))
 	if offset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/flatpark/rpak/internal/metadata"
 	"github.com/flatpark/rpak/internal/prefetch"
+	"github.com/flatpark/rpak/internal/units"
 )
 
 // Terminal output of install and update: the plan table, the progress
@@ -152,24 +153,9 @@ func writeLines(w io.Writer, t term, lines []line) {
 	io.WriteString(w, b.String())
 }
 
-// humanSize formats a size as flatpak does (g_format_size): decimal
-// units, "412.3 MB", for all of rpak's output.
-func humanSize(n int64) string {
-	if n < 1000 {
-		if n == 1 {
-			return "1 byte"
-		}
-		return fmt.Sprintf("%d bytes", n)
-	}
-	v := float64(n)
-	for _, unit := range []string{"kB", "MB", "GB", "TB", "PB"} {
-		v /= 1000
-		if v < 999.95 {
-			return fmt.Sprintf("%.1f %s", v, unit)
-		}
-	}
-	return fmt.Sprintf("%.1f EB", v/1000)
-}
+// humanSize is units.Size: decimal units, "412.3 MB", for all of rpak's
+// output.
+func humanSize(n int64) string { return units.Size(n) }
 
 // humanRate formats bytes per second, "6.2 MB/s".
 func humanRate(n int64) string {

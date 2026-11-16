@@ -51,6 +51,24 @@ step "remotes"
 flatpak remote-add --user flatpark https://dl.flatpark.org/flatpark.flatpakrepo
 flatpak remotes --user
 
+step "rpak doctor $PLAIN, before it is installed"
+# doctor reads the remote's summary itself, into memory: flatpark's commit
+# of the app, without flatpak caching the summary in the repository.
+state > /tmp/state.before
+code=0
+rpak doctor "$PLAIN" > /tmp/doctor.log 2>&1 || code=$?
+sed -n "/^== App $PLAIN/,/^Data and state/p" /tmp/doctor.log
+[ "$code" -le 1 ] || fail "rpak doctor $PLAIN exited $code"
+grep -qx "  not installed in any installation" /tmp/doctor.log || fail "rpak doctor $PLAIN: not reported as not installed"
+grep -Eq "^(✓|✗) extra-data .* \(remote flatpark \(User installation\), branch stable\)$" /tmp/doctor.log ||
+	fail "rpak doctor $PLAIN: no extra-data check from the flatpark remote"
+state > /tmp/state.after
+diff /tmp/state.before /tmp/state.after || fail "rpak doctor $PLAIN changed files"
+code=0
+rpak doctor org.rpak.NoSuchApp > /tmp/doctor.log 2>&1 || code=$?
+grep -q "^! org.rpak.NoSuchApp is not found in any remote$" /tmp/doctor.log || fail "rpak doctor org.rpak.NoSuchApp: $(grep NoSuchApp /tmp/doctor.log)"
+pass "rpak doctor finds the extra-data of an app that is not installed in the remote, changing nothing"
+
 step "extra-data of the apps under test"
 for app in "$PLAIN" "${APPS[@]}"; do
 	echo "--- $app"
@@ -296,6 +314,48 @@ keys "$new" > /tmp/keys
 echo "org.rpak.E2E: commitmeta $(stat -c %s "$(commitmeta org.rpak.E2E)") bytes"
 flatpak run --user --command=true org.rpak.E2E || fail "org.rpak.E2E does not run"
 pass "rpak update stripped xa.extra-data of the new commit"
+
+step "rpak doctor"
+# A redaction point: a global override naming a path in $HOME, which
+# doctor prints as ~/... (the user is root here, whose name is left as is).
+mkdir -p "$FLATPAK_USER_DIR/overrides" "$HOME/.var/app/${APPS[0]}"
+printf '[Context]\nfilesystems=%s/rpak-doctor-secret;\n' "$HOME" > "$FLATPAK_USER_DIR/overrides/global"
+state > /tmp/state.before
+SECONDS=0
+for argv in "" "${APPS[0]}"; do
+	code=0
+	# shellcheck disable=SC2086 # no argument for the first run
+	rpak doctor $argv > /tmp/doctor.log 2>&1 || code=$?
+	cat /tmp/doctor.log
+	[ "$code" -le 1 ] || fail "rpak doctor $argv exited $code"
+	for title in "rpak and flatpak" Environment System Installations "Extra-data directory" Network Problems; do
+		grep -qx "== $title" /tmp/doctor.log || fail "rpak doctor $argv: no section $title"
+	done
+	grep -qF "~/rpak-doctor-secret" /tmp/doctor.log || fail "rpak doctor $argv: the global override is not shown redacted"
+	! grep -qF "$HOME/" /tmp/doctor.log || fail "rpak doctor $argv: $HOME/ in the output: $(grep -F "$HOME/" /tmp/doctor.log | head -3)"
+done
+pass "rpak doctor: all sections, $HOME shown as ~ (${SECONDS}s for both runs)"
+grep -qx "== App ${APPS[0]}" /tmp/doctor.log || fail "no section for ${APPS[0]}"
+grep -E '^(✓|✗) extra-data .* \(installed and remote commit\)$' /tmp/doctor.log || fail "no extra-data check of the remote's commit of ${APPS[0]}"
+grep -qF "~/.var/app/${APPS[0]}: " /tmp/doctor.log || fail "no data directory line for ${APPS[0]}"
+pass "rpak doctor ${APPS[0]}: the app's section with the extra-data check of the remote's commit"
+# flathub is in the system installation, flatpark in the user one: neither
+# is missing. The e2e remote is a local repository, unsigned as usual.
+! grep -q "no remote named" /tmp/doctor.log || fail "rpak doctor: $(grep "no remote named" /tmp/doctor.log)"
+! grep -q "remote e2e is not GPG-verified" /tmp/doctor.log || fail "rpak doctor: the local e2e remote is reported unsigned"
+grep -q "^  remote e2e  file:///tmp/repo  (priority 1, no-gpg-verify)$" /tmp/doctor.log || fail "rpak doctor: no line for the e2e remote"
+pass "rpak doctor: remotes judged across installations, the local remote's no-gpg-verify not a problem"
+state > /tmp/state.after
+diff /tmp/state.before /tmp/state.after || fail "rpak doctor changed files"
+pass "rpak doctor changed nothing"
+rm -f "$FLATPAK_USER_DIR/overrides/global"
+
+step "rpak complete: doctor"
+rpak complete "rpak doctor " 12 "" | tee /tmp/complete.log
+grep -qx "${APPS[1]} " /tmp/complete.log || fail "rpak doctor <TAB> does not offer ${APPS[1]}"
+line="rpak doctor com.ferris"
+[ "$(rpak complete "$line" "${#line}" com.ferris)" = "com.ferrispad.FerrisPad " ] || fail "rpak doctor com.ferris<TAB>"
+pass "rpak doctor completes the installed apps"
 
 step "final checks"
 flatpak repair --user > /tmp/repair.log 2>&1 || { cat /tmp/repair.log; fail "flatpak repair failed"; }
