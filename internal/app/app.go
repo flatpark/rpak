@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +28,8 @@ Commands:
   update     prefetch, then run "flatpak update ARGS..."
   install    prefetch, then run "flatpak install ARGS..."
   clean      free the space flatpak leaves behind (see "rpak clean --help")
+  doctor     show what to paste into a problem report, and what looks wrong
+             (see "rpak doctor --help")
   completion print the completion script for bash, zsh or fish
              (see "rpak completion --help" for how to install it)
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
@@ -128,6 +129,8 @@ func run(version string, argv []string) int {
 		return cleanCommand(append(argv[:i:i], argv[i+1:]...), os.Stdout, os.Stderr)
 	case "completion":
 		return completionCommand(argv[i+1:], os.Stdout, os.Stderr)
+	case "doctor":
+		return doctorCommand(version, argv[i+1:], os.Stdout, os.Stderr)
 	default:
 		return passthrough(argv)
 	}
@@ -386,13 +389,9 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 
 func jobs(warn func(string, ...any)) int {
 	v := os.Getenv("RPAK_JOBS")
-	if v == "" {
-		return 4
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 || n > 16 {
-		warn("RPAK_JOBS=%q is not a number from 1 to 16, using 4", v)
-		return 4
+	n, ok := prefetch.ParseJobs(v)
+	if !ok {
+		warn("RPAK_JOBS=%q is not a number from 1 to %d, using %d", v, prefetch.MaxJobs, n)
 	}
 	return n
 }

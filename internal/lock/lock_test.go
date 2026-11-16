@@ -175,3 +175,49 @@ func TestOpenErrors(t *testing.T) {
 		t.Errorf("symlinked lock file (O_NOFOLLOW): %v", err)
 	}
 }
+
+func TestProbe(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "repo-lock")
+
+	// A missing file is free, and Probe does not create it.
+	if busy, _, err := Probe(path); err != nil || busy {
+		t.Fatalf("missing: busy %v, err %v", busy, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Probe created the file: %v", err)
+	}
+
+	for _, kind := range []string{"ofd-read", "ofd-write", "posix-write"} {
+		release := holder(t, kind, path)
+		busy, pid, err := Probe(path)
+		if err != nil || !busy {
+			t.Errorf("%s: busy %v, err %v", kind, busy, err)
+		}
+		if kind == "posix-write" && pid <= 0 || kind != "posix-write" && pid != -1 {
+			t.Errorf("%s: pid %d", kind, pid)
+		}
+		release()
+	}
+
+	// Free, and probing leaves no lock behind: an exclusive lock from
+	// another process can be taken right after, while this one keeps the
+	// file open.
+	keep, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keep.Close()
+	for range 2 {
+		if busy, _, err := Probe(path); err != nil || busy {
+			t.Fatalf("free: busy %v, err %v", busy, err)
+		}
+	}
+	release := holder(t, "ofd-write", path)
+	release()
+	l, err := Glnx(path)
+	if err != nil {
+		t.Fatalf("Glnx after Probe: %v", err)
+	}
+	l.Release()
+}

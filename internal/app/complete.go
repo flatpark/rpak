@@ -222,6 +222,9 @@ func completeCommand(argv []string, stdout io.Writer) int {
 	case "completion":
 		c.completion(stdout, c.words[i+1:])
 		return 0
+	case "doctor":
+		c.doctor(stdout, c.words[i+1:])
+		return 0
 	}
 	return c.flatpak(stdout)
 }
@@ -246,7 +249,7 @@ func (c *completion) flatpak(stdout io.Writer) int {
 }
 
 // ownCommands are the commands rpak adds to flatpak's.
-var ownCommands = []string{"clean", "completion"}
+var ownCommands = []string{"clean", "completion", "doctor"}
 
 // commands completes the command name: flatpak's candidates (commands, or
 // global options for "-"), and rpak's own commands. If flatpak cannot be
@@ -395,5 +398,46 @@ func (c *completion) completion(stdout io.Writer, args []shellWord) {
 		if word, ok := c.completeWord(candidate); ok {
 			fmt.Fprintln(stdout, word)
 		}
+	}
+}
+
+// doctor completes rpak doctor's arguments: --help, or the ids of the
+// installed apps, as "flatpak run" completes them (in every installation).
+// flatpak run only completes its first argument, and every argument of
+// doctor is an id, so flatpak gets a line with the current word alone, the
+// cursor at its end, and the shell's own current word: what flatpak makes
+// of that (completeWord) is what the shell expects here too. Options of
+// run and ids already on the line are dropped. If flatpak cannot be
+// asked, nothing is offered.
+func (c *completion) doctor(stdout io.Writer, args []shellWord) {
+	if strings.HasPrefix(c.cur, "-") {
+		if word, ok := c.completeWord("--help "); ok {
+			fmt.Fprintln(stdout, word)
+		}
+		return
+	}
+	line := "flatpak run " + c.cur
+	var out bytes.Buffer
+	cmd := exec.Command(flatpakPath(), "complete", line, strconv.Itoa(len(line)), c.shellCur)
+	cmd.Stdout = &out
+	if cmd.Run() != nil {
+		return
+	}
+	given := map[string]bool{}
+	for _, w := range args {
+		given[w.text] = true
+	}
+	// A candidate starts where the shell's word starts, which is cur
+	// without what precedes the shell's word in it (bash splits at "=").
+	before := ""
+	if strings.HasSuffix(c.cur, c.shellCur) {
+		before = c.cur[:len(c.cur)-len(c.shellCur)]
+	}
+	for _, candidate := range strings.Split(out.String(), "\n") {
+		id := strings.TrimSpace(candidate)
+		if id == "" || strings.HasPrefix(id, "-") || given[before+id] {
+			continue
+		}
+		fmt.Fprintln(stdout, candidate)
 	}
 }
