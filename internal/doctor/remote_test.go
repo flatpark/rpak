@@ -147,8 +147,8 @@ func TestAppCommits(t *testing.T) {
 	if got := labels(ai.checks); len(got) != 1 || got[0] != "installed and remote commit" || ai.remoteErr != nil {
 		t.Errorf("same commit: %q, %v", got, ai.remoteErr)
 	}
-	if level, what := ai.checks[0].extra[0].Judge(); level != OK || what != "HTTP 200, 1.0 kB as pinned" {
-		t.Errorf("same commit: %v %s", level, what)
+	if what := ai.checks[0].extra[0].Text(); what != "HTTP 200, 1.0 kB (pinned 1.0 kB)" {
+		t.Errorf("same commit: %s", what)
 	}
 
 	// An update is pending: both, the remote's first.
@@ -194,13 +194,9 @@ func TestAppCommits(t *testing.T) {
 	d.searchRemotes(a, []*instInfo{in, in2})
 	var got []string
 	for _, f := range a.found {
-		level, what := f.check.extra[0].Judge()
-		got = append(got, f.check.label+": "+what)
-		if level != OK {
-			t.Errorf("%s: %v", f.check.label, level)
-		}
+		got = append(got, f.check.label+": "+f.check.extra[0].Text())
 	}
-	if strings.Join(got, "|") != "remote flatpark (User installation), branch beta: HTTP 200, 2.0 kB as pinned|remote flatpark (User installation), branch stable: HTTP 200, 1.0 kB as pinned" || len(a.unreadable) != 0 {
+	if strings.Join(got, "|") != "remote flatpark (User installation), branch beta: HTTP 200, 2.0 kB (pinned 2.0 kB)|remote flatpark (User installation), branch stable: HTTP 200, 1.0 kB (pinned 1.0 kB)" || len(a.unreadable) != 0 {
 		t.Errorf("not installed: %q, unreadable %q", got, a.unreadable)
 	}
 	a = &appInfo{id: "org.example.Nope"}

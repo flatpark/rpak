@@ -152,75 +152,76 @@ func TestRun(t *testing.T) {
 		t.Errorf("sections: %s", got)
 	}
 
-	for _, c := range []struct {
-		title, prefix string
-		level         Level
-	}{
-		{"rpak and flatpak", "Flatpak 1.16.1", OK},
-		{"rpak and flatpak", "distribution: Test OS 1", Info},
-		{"Environment", "RPAK_JOBS=99 is not a number", Warn},
-		{"Environment", "XDG_DATA_DIRS lacks ~/.local/share/flatpak/exports/share", Warn},
-		{"Environment", "https_proxy=http://***@proxy.example:3128", Info},
-		{"System", "xdg-desktop-portal is not running", Warn},
-		{"System", "GPU: none found in /sys/class/drm", Info},
-		{"Installations", "remote local  file://~/repo  (priority 0, no-gpg-verify)", Info},
-		{"Installations", "no remote named flathub in any installation", Warn},
-		{"Installations", "global override (~/.local/share/flatpak/overrides/global)", Warn},
-		{"Installations", "apps with an override: org.example.Extra", Info},
-		{"Installations", "2 apps, 2 runtimes", Info},
-		{"Extra-data directory", "1 partial downloads (.part), 2 bytes", Warn},
-		{"Network", "proxy for https: http://***@proxy.example:3128, for http: none", Info},
-		{"Network", srv.URL + "/repo/summary  HTTP 200", OK},
-		{"Network", srv.URL + "/flatpark.flatpakrepo  HTTP 200", OK},
-		{"App org.example.Extra", "runtime org.freedesktop.Platform/x86_64/25.08 (User installation) is end-of-life", Warn},
-		// The remote has another commit than the installed one: both.
-		{"App org.example.Extra", "extra-data app.deb  https://example.org/app-1.0.deb  HTTP 200, 1.0 kB as pinned (remote commit, pending update)", OK},
-		{"App org.example.Extra", "extra-data chrome.deb  " + srv.URL + "/chrome.deb  HTTP 200, 1.0 kB as pinned (cached) (installed commit)", OK},
-		{"App org.example.Extra", "extra-data other.deb  " + srv.URL + "/other.deb  the server has 500 bytes, pinned 400 bytes", Fail},
+	for _, c := range []struct{ title, prefix string }{
+		{"rpak and flatpak", "rpak test  " + rpak + "  (latest release: not checked)"},
+		{"rpak and flatpak", "flatpak 1.16.1  " + flatpak},
+		{"rpak and flatpak", "distribution: Test OS 1"},
+		{"rpak and flatpak", "architecture: x86_64"},
+		// The value, and what rpak makes of it.
+		{"Environment", "RPAK_JOBS=99  (4 downloads at a time)"},
+		{"Environment", "RPAK_DRY_RUN=(unset)"},
+		{"Environment", "XDG_DATA_DIRS=/usr/share"},
+		{"Environment", "https_proxy=http://***@proxy.example:3128"},
+		{"System", "user.max_user_namespaces=100"},
+		{"System", "xdg-desktop-portal: not running; backends running: none"},
+		{"System", "GPU: none found in /sys/class/drm"},
+		{"System", "GL extension (default): org.freedesktop.Platform.GL.default/x86_64/25.08  User installation"},
+		{"Installations", "writable, "},
+		{"Installations", "repo/.lock: not locked"},
+		{"Installations", "remote flatpark  " + srv.URL + "/repo/  (priority 1)"},
+		{"Installations", "remote local  file://~/repo  (priority 0, no-gpg-verify)"},
+		{"Installations", "2 apps, 2 runtimes"},
+		{"Installations", "end-of-life: org.freedesktop.Platform//25.08"},
+		{"Installations", "global override ~/.local/share/flatpak/overrides/global:"},
+		{"Installations", "apps with an override: org.example.Extra"},
+		{"Extra-data directory", "~/.local/share/flatpak/extra-data: 2 entries, 1.0 kB"},
+		{"Extra-data directory", "1 partial downloads (.part), 2 bytes"},
+		{"Network", "proxy for https: http://***@proxy.example:3128, for http: none"},
+		{"Network", srv.URL + "/repo/summary  HTTP 200 in "},
+		{"Network", srv.URL + "/flatpark.flatpakrepo  HTTP 200 in "},
+		{"App org.example.Extra", "ref: app/org.example.Extra/x86_64/stable"},
+		{"App org.example.Extra", "runtime: org.freedesktop.Platform/x86_64/25.08  installed in User installation  end-of-life: too old, really"},
+		// The remote has another commit than the installed one: both, and
+		// both sizes, also where they are the same.
+		{"App org.example.Extra", "extra-data app.deb  https://example.org/app-1.0.deb  HTTP 200, 1.0 kB (pinned 1.0 kB)  (remote commit, pending update)"},
+		{"App org.example.Extra", "extra-data chrome.deb  " + srv.URL + "/chrome.deb  HTTP 200, 1.0 kB (pinned 1.0 kB)  cached  (installed commit)"},
+		{"App org.example.Extra", "extra-data other.deb  " + srv.URL + "/other.deb  HTTP 200, 500 bytes (pinned 400 bytes)  (installed commit)"},
 		// Not installed, found in the remote.
-		{"App org.example.Plain", "not installed in any installation", Info},
-		{"App org.example.Plain", "no extra-data (remote flatpark (User installation), branch stable)", Info},
-		{"App org.example.Extra", "override " + "~/.local/share/flatpak/overrides/org.example.Extra", Info},
-		{"App org.example.Extra", "also subject to the global override of the user installation", Info},
-		{"App org.example.Extra", "permission store (flatpak permission-show): none", Info},
-		{"App org.example.Extra", "~/.var/app/org.example.Extra: 5 bytes", Info},
-		{"App org.example.Extra", "running: pid 4242", Info},
-		{"App org.example.Gone", "org.example.Gone is not found in any remote", Warn},
-		{"App org.example.Gone", "cannot read the permission store: flatpak permission-show: error: no session bus", Warn},
+		{"App org.example.Plain", "not installed in any installation"},
+		{"App org.example.Plain", "no extra-data (remote flatpark (User installation), branch stable)"},
+		{"App org.example.Extra", "override " + "~/.local/share/flatpak/overrides/org.example.Extra:"},
+		{"App org.example.Extra", "the global override of the user installation applies too"},
+		{"App org.example.Extra", "permission store (flatpak permission-show): none"},
+		{"App org.example.Extra", "~/.var/app/org.example.Extra: 5 bytes"},
+		{"App org.example.Extra", "running: pid 4242"},
+		{"App org.example.Gone", "not found in any remote"},
+		{"App org.example.Gone", "permission store (flatpak permission-show): flatpak permission-show: error: no session bus"},
 	} {
-		it, ok := find(r, c.title, c.prefix)
-		if !ok {
+		if _, ok := find(r, c.title, c.prefix); !ok {
 			t.Errorf("%s: no item %q", c.title, c.prefix)
-			continue
-		}
-		if it.Level != c.level {
-			t.Errorf("%s: %q is %v, want %v", c.title, it.Text, it.Level, c.level)
-		}
-		if (it.Level == Warn || it.Level == Fail) && it.Hint == "" {
-			t.Errorf("%s: %q has no hint", c.title, it.Text)
-		}
-	}
-	// The end-of-life runtime is the app's: in its section, not again in
-	// the installation's.
-	for _, s := range r.Sections {
-		for _, it := range s.Items {
-			if s.Title == "Installations" && strings.Contains(it.Text, "end-of-life") {
-				t.Errorf("Installations: %q", it.Text)
-			}
 		}
 	}
 	// The remote's file:// URL is not checked, its summary is checked once.
-	if it, ok := find(r, "Network", "file://~/repo  not checked"); !ok || it.Level != Info {
-		t.Errorf("file remote: %+v %v", it, ok)
+	if _, ok := find(r, "Network", "file://~/repo  not checked: not over HTTP"); !ok {
+		t.Error("file remote checked")
 	}
-	if !r.Failed() {
-		t.Error("not Failed with a replaced extra-data file")
+	// The unused system installation: only facts, nothing about missing
+	// remotes.
+	if _, ok := find(r, "Installations", "0 apps, 0 runtimes"); !ok {
+		t.Error("system installation: no counts")
+	}
+	for _, s := range r.Sections {
+		for _, it := range s.Items {
+			if strings.Contains(it.Text, "no remote named") {
+				t.Errorf("%s: %q", s.Title, it.Text)
+			}
+		}
 	}
 
 	// Nothing of the home directory or the user name, and no password.
 	for _, s := range r.Sections {
 		for _, it := range s.Items {
-			for _, text := range []string{it.Text, it.Hint, it.Block, it.Context} {
+			for _, text := range []string{it.Text, it.Block} {
 				if strings.Contains(text, home) || strings.Contains(text, "alice") || strings.Contains(text, "hunter2") {
 					t.Errorf("%s: not redacted: %q", s.Title, text)
 				}
@@ -234,13 +235,6 @@ func TestRun(t *testing.T) {
 		t.Errorf("permissions block %q", it.Block)
 	}
 
-	// Nothing about the unused system installation, and a local remote
-	// without GPG verification is not a problem.
-	for _, p := range r.Problems() {
-		if strings.HasPrefix(p.Context, "System installation") || strings.Contains(p.Text, "remote local") {
-			t.Errorf("problem: %s: %s", p.Context, p.Text)
-		}
-	}
 	// Read-only: besides the files (above), no flatpak command but
 	// queries ran, and not remote-info, which caches the summary.
 	for _, call := range runner.calls {
@@ -291,6 +285,7 @@ func TestRunFlatpakIsRpak(t *testing.T) {
 	link := filepath.Join(bin, "flatpak")
 	os.Symlink(rpak, link)
 	runner := &fakeRunner{}
+	os.MkdirAll(filepath.Join(bin, "user"), 0o755)
 	cfg := Config{
 		Version: "dev", Executable: rpak, Flatpak: link, Runner: runner,
 		LookupEnv: func(k string) (string, bool) {
@@ -305,16 +300,16 @@ func TestRunFlatpakIsRpak(t *testing.T) {
 		Home: bin, Root: t.TempDir(), Apps: []string{"org.example.App"},
 	}
 	r := Run(context.Background(), cfg)
-	if it, ok := find(r, "rpak and flatpak", "flatpak in PATH is rpak itself"); !ok || it.Level != Fail {
-		t.Errorf("self: %+v %v", it, ok)
+	if _, ok := find(r, "rpak and flatpak", "flatpak in PATH resolves to this rpak binary (~/flatpak); no flatpak command is run"); !ok {
+		t.Errorf("self: %+v", r.Sections[0].Items)
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("flatpak ran: %q", runner.calls)
 	}
-	if !r.Failed() {
-		t.Error("not Failed")
+	if _, ok := find(r, "App org.example.App", "not checked: no flatpak command is run"); !ok {
+		t.Error("app checked")
 	}
-	if it, ok := find(r, "App org.example.App", "org.example.App: not checked"); !ok || it.Level != Warn {
-		t.Errorf("app: %+v %v", it, ok)
+	if _, ok := find(r, "Installations", "remotes and refs: not listed, no flatpak command is run"); !ok {
+		t.Error("installation: remotes listed")
 	}
 }

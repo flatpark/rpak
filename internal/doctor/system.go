@@ -112,23 +112,6 @@ func GPUs(drm string) []GPU {
 	return out
 }
 
-// UsernsProblem says why unprivileged user namespaces, which bubblewrap
-// needs to start any app, are off, and the setting that turns them on, or
-// "" if they are not off. value is that of a sysctl in usernsSysctls.
-func UsernsProblem(name, value string) (problem, fix string) {
-	switch name {
-	case "user.max_user_namespaces":
-		if value == "0" {
-			return "user namespaces are disabled (user.max_user_namespaces=0)", "user.max_user_namespaces=15000"
-		}
-	case "kernel.unprivileged_userns_clone":
-		if value == "0" {
-			return "unprivileged user namespaces are disabled (kernel.unprivileged_userns_clone=0)", "kernel.unprivileged_userns_clone=1"
-		}
-	}
-	return "", ""
-}
-
 // PortalProcesses returns the names of the xdg-desktop-portal processes
 // (the frontend and its backends) that uid runs, sorted. comm is cut to 15
 // characters ("xdg-desktop-por"), so for those the name is taken from the
@@ -226,27 +209,20 @@ func NvidiaVersion(text string) string {
 	return ""
 }
 
-// NvidiaExtension is the GL extension flatpak needs for an NVIDIA driver
-// version: org.freedesktop.Platform.GL.nvidia-580-95-05 for 580.95.05.
-func NvidiaExtension(version string) string {
-	return "org.freedesktop.Platform.GL.nvidia-" + strings.ReplaceAll(version, ".", "-")
-}
-
-// gpuItems are the graphics cards, which say which GL extension apps need,
-// and what they mean for the NVIDIA check.
+// gpuItems are the graphics cards and the NVIDIA driver's version.
 func (d *doctor) gpuItems(s *builder, sys systemInfo) {
-	r := d.r
 	if len(sys.gpus) == 0 {
-		s.add(Info, "GPU: none found in /sys/class/drm")
-		return
+		s.add("GPU: none found in /sys/class/drm")
 	}
 	var bound []string
+	nvidiaBound := false
 	for _, g := range sys.gpus {
 		driver := "no driver"
 		if g.Driver != "" {
 			driver = "driver " + g.Driver
 			bound = append(bound, g.VendorName())
 		}
+		nvidiaBound = nvidiaBound || g.Driver == "nvidia"
 		boot := ""
 		if g.Boot {
 			boot = " (boot)"
@@ -255,32 +231,27 @@ func (d *doctor) gpuItems(s *builder, sys systemInfo) {
 		if name == g.Vendor+" " {
 			name = ""
 		}
-		s.add(Info, "GPU %s: %s%s:%s, %s%s", g.Card, name, g.Vendor, g.Device, driver, boot)
+		s.add("GPU %s: %s%s:%s, %s%s", g.Card, name, g.Vendor, g.Device, driver, boot)
 	}
 	if len(bound) > 1 {
-		s.add(Info, "hybrid graphics: %s", strings.Join(bound, " + "))
+		s.add("hybrid graphics: %s", strings.Join(bound, " + "))
 	}
-	for _, g := range sys.gpus {
-		if g.Vendor != "10de" {
-			continue
-		}
-		switch {
-		case g.Driver == "nouveau":
-			s.add(Info, "NVIDIA %s uses nouveau, which Mesa drives through GL.default: no GL.nvidia extension is needed", g.Card)
-		case g.Driver == "nvidia" && sys.nvidia == "":
-			why := "has no driver version"
-			var pe *fs.PathError
-			switch {
-			case errors.Is(sys.nvidiaErr, fs.ErrNotExist):
-				why = "does not exist"
-			case errors.As(sys.nvidiaErr, &pe):
-				why = "cannot be read: " + pe.Err.Error()
-			case sys.nvidiaErr != nil:
-				why = "cannot be read: " + sys.nvidiaErr.Error()
-			}
-			s.add(Warn, "NVIDIA %s uses the nvidia driver, but /proc/driver/nvidia/version %s: the GL.nvidia extension apps need is unknown", g.Card, why).
-				hint(r, "check that the nvidia kernel module is loaded and matches the driver (cat /proc/driver/nvidia/version, nvidia-smi)")
-		}
+
+	// The version is said if the file is there, and if it is not, only
+	// where a card uses the nvidia driver.
+	var pe *fs.PathError
+	switch {
+	case sys.nvidia != "":
+		s.add("NVIDIA driver %s", sys.nvidia)
+	case sys.nvidiaErr == nil:
+		s.add("NVIDIA driver version: none in /proc/driver/nvidia/version")
+	case !nvidiaBound:
+	case errors.Is(sys.nvidiaErr, fs.ErrNotExist):
+		s.add("NVIDIA driver version: /proc/driver/nvidia/version does not exist")
+	case errors.As(sys.nvidiaErr, &pe):
+		s.add("NVIDIA driver version: /proc/driver/nvidia/version: %v", pe.Err)
+	default:
+		s.add("NVIDIA driver version: %v", sys.nvidiaErr)
 	}
 }
 
@@ -311,32 +282,26 @@ func (d *doctor) systemSection(sys systemInfo, insts []*instInfo) Section {
 	s := d.section("System")
 	r := d.r
 	for _, c := range sys.userns {
-		if p, fix := UsernsProblem(c.name, c.value); p != "" {
-			s.add(Fail, "%s: flatpak cannot start apps", p).
-				hint(r, "sudo sysctl %s, and put %s in a file in /etc/sysctl.d to keep it", fix, fix)
-		} else {
-			s.add(Info, "%s=%s", c.name, c.value)
-		}
+		s.add("%s=%s", c.name, c.value)
 	}
 
-	switch main := contains(sys.portals, "xdg-desktop-portal"); {
-	case main:
-		var backends []string
-		for _, p := range sys.portals {
-			if p != "xdg-desktop-portal" {
-				backends = append(backends, strings.TrimPrefix(p, "xdg-desktop-portal-"))
-			}
+	var backends []string
+	for _, p := range sys.portals {
+		if p != "xdg-desktop-portal" {
+			backends = append(backends, strings.TrimPrefix(p, "xdg-desktop-portal-"))
 		}
-		if len(backends) == 0 {
-			backends = []string{"none running"}
-		}
-		s.add(OK, "xdg-desktop-portal is running; backends: %s", strings.Join(backends, ", "))
-	default:
-		s.add(Warn, "xdg-desktop-portal is not running: file choosers, opening links and screen sharing will not work in apps").
-			hint(r, "install xdg-desktop-portal and the backend for your desktop (-gtk, -gnome, -kde, -wlr, ...); it starts with the session")
+	}
+	running := "none"
+	if len(backends) > 0 {
+		running = strings.Join(backends, ", ")
+	}
+	if contains(sys.portals, "xdg-desktop-portal") {
+		s.add("xdg-desktop-portal: running; backends running: %s", running)
+	} else {
+		s.add("xdg-desktop-portal: not running; backends running: %s", running)
 	}
 	for _, f := range sys.portalFiles {
-		it := s.add(Info, "%s", f.path)
+		it := s.add("%s", f.path)
 		if f.content != "" {
 			it.block(r, f.content)
 		}
@@ -354,26 +319,13 @@ func (d *doctor) systemSection(sys systemInfo, insts []*instInfo) Section {
 		}
 	}
 	if len(exts) == 0 {
-		s.add(Info, "GL extensions: none installed")
+		s.add("GL extensions: none installed")
 	}
 	for _, kind := range []string{"default", "nvidia", "other"} {
 		for _, e := range exts {
 			if GLKind(e.id) == kind {
-				s.add(Info, "GL extension (%s): %s  %s", kind, e.ref, e.where)
+				s.add("GL extension (%s): %s  %s", kind, e.ref, e.where)
 			}
-		}
-	}
-	if sys.nvidia != "" {
-		want := NvidiaExtension(sys.nvidia)
-		found := false
-		for _, e := range exts {
-			found = found || e.id == want
-		}
-		if found {
-			s.add(OK, "NVIDIA driver %s, %s is installed", sys.nvidia, want)
-		} else {
-			s.add(Fail, "NVIDIA driver %s, but %s is not installed: apps fall back to software rendering or do not start", sys.nvidia, want).
-				hint(r, "flatpak update, or flatpak install flathub %s", want)
 		}
 	}
 	return s.done()

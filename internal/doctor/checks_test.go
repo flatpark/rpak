@@ -51,51 +51,28 @@ func TestSameExecutable(t *testing.T) {
 	}
 }
 
-func TestJobsAndDryRun(t *testing.T) {
-	for _, c := range []struct {
-		v  string
-		n  int
-		ok bool
-	}{
-		{"", 4, true}, {"1", 1, true}, {"16", 16, true}, {"8", 8, true},
-		{"0", 4, false}, {"17", 4, false}, {"-2", 4, false}, {"four", 4, false}, {" 4", 4, false},
+func TestEnv(t *testing.T) {
+	// RPAK_JOBS with the number of downloads rpak runs for it.
+	for v, want := range map[string]string{
+		"": "RPAK_JOBS=(unset)  (4 downloads at a time)", "1": "RPAK_JOBS=1  (1 downloads at a time)",
+		"16": "RPAK_JOBS=16  (16 downloads at a time)", "0": "RPAK_JOBS=0  (4 downloads at a time)",
+		"17": "RPAK_JOBS=17  (4 downloads at a time)", "four": "RPAK_JOBS=four  (4 downloads at a time)",
 	} {
-		if n, ok := JobsCheck(c.v); n != c.n || ok != c.ok {
-			t.Errorf("JobsCheck(%q) = %d %v, want %d %v", c.v, n, ok, c.n, c.ok)
+		d := &doctor{cfg: Config{LookupEnv: func(k string) (string, bool) {
+			if k == "RPAK_JOBS" && v != "" {
+				return v, true
+			}
+			return "", false
+		}}}
+		found := false
+		for _, it := range d.envSection().Items {
+			found = found || it.Text == want
 		}
-	}
-	for v, want := range map[string]bool{"": false, "0": false, "1": true, "yes": true} {
-		if DryRun(v) != want {
-			t.Errorf("DryRun(%q) = %v", v, !want)
+		if !found {
+			t.Errorf("RPAK_JOBS=%q: no %q in %+v", v, want, d.envSection().Items)
 		}
 	}
 }
-
-func TestMissingDataDirs(t *testing.T) {
-	user, system := "/home/a/.local/share/flatpak/exports/share", "/var/lib/flatpak/exports/share"
-	for _, c := range []struct {
-		value  string
-		set    bool
-		wanted []string
-		want   []string
-	}{
-		{user + ":" + system + ":/usr/local/share:/usr/share", true, []string{user, system}, nil},
-		// Trailing slashes and order do not matter.
-		{"/usr/share/:" + system + "/:" + user + "/", true, []string{user, system}, nil},
-		{"/usr/local/share:/usr/share", true, []string{user, system}, []string{user, system}},
-		{system + ":/usr/share", true, []string{user}, []string{user}},
-		// Unset or empty: /usr/local/share:/usr/share.
-		{"", false, []string{system}, []string{system}},
-		{"", true, []string{system}, []string{system}},
-		// Nothing installed anywhere: nothing wanted.
-		{"/usr/share", true, nil, nil},
-	} {
-		if got := MissingDataDirs(c.value, c.set, c.wanted); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("MissingDataDirs(%q, %v, %q) = %q, want %q", c.value, c.set, c.wanted, got, c.want)
-		}
-	}
-}
-
 func TestNvidia(t *testing.T) {
 	for text, want := range map[string]string{
 		"NVRM version: NVIDIA UNIX x86_64 Kernel Module  580.95.05  Tue Sep 23 09:46:56 UTC 2025\nGCC version:  gcc 14\n": "580.95.05",
@@ -106,9 +83,6 @@ func TestNvidia(t *testing.T) {
 		if got := NvidiaVersion(text); got != want {
 			t.Errorf("NvidiaVersion(%q) = %q, want %q", text, got, want)
 		}
-	}
-	if got := NvidiaExtension("580.95.05"); got != "org.freedesktop.Platform.GL.nvidia-580-95-05" {
-		t.Errorf("NvidiaExtension = %q", got)
 	}
 	for id, want := range map[string]string{
 		"org.freedesktop.Platform.GL.default":            "default",
@@ -139,67 +113,46 @@ func TestNvidia(t *testing.T) {
 		}
 		return d.systemSection(d.systemInfo(), []*instInfo{user, {}}).Items
 	}
-	level := func(items []Item, prefix string) (Level, bool) {
+	has := func(items []Item, prefix string) bool {
 		for _, it := range items {
 			if strings.HasPrefix(it.Text, prefix) {
-				return it.Level, true
+				return true
 			}
 		}
-		return 0, false
+		return false
 	}
-	items := run("580.95.05", "org.freedesktop.Platform.GL.default/x86_64/25.08", "org.freedesktop.Platform.GL.nvidia-580-95-05/x86_64/1.4")
-	if l, ok := level(items, "NVIDIA driver 580.95.05"); !ok || l != OK {
-		t.Errorf("matching extension: %v %v", l, ok)
+	// The driver's version and the extensions, whatever they are.
+	items := run("580.95.05", "org.freedesktop.Platform.GL.nvidia-575-64-05/x86_64/1.4", "org.freedesktop.Platform.GL32.nvidia-580-95-05/x86_64/1.4")
+	for _, want := range []string{
+		"NVIDIA driver 580.95.05",
+		"GL extension (nvidia): org.freedesktop.Platform.GL.nvidia-575-64-05/x86_64/1.4  User installation",
+		"GL extension (nvidia): org.freedesktop.Platform.GL32.nvidia-580-95-05/x86_64/1.4  User installation",
+	} {
+		if !has(items, want) {
+			t.Errorf("no %q in %+v", want, items)
+		}
 	}
-	if _, ok := level(items, "GL extension (nvidia): org.freedesktop.Platform.GL.nvidia-580-95-05/x86_64/1.4"); !ok {
-		t.Errorf("nvidia extension not listed: %+v", items)
-	}
-	items = run("580.95.05", "org.freedesktop.Platform.GL.nvidia-575-64-05/x86_64/1.4", "org.freedesktop.Platform.GL32.nvidia-580-95-05/x86_64/1.4")
-	if l, ok := level(items, "NVIDIA driver 580.95.05"); !ok || l != Fail {
-		t.Errorf("other version, or only the 32-bit one: %v %v", l, ok)
-	}
-	if _, ok := level(run("", "org.freedesktop.Platform.GL.default/x86_64/25.08"), "NVIDIA"); ok {
+	if has(run("", "org.freedesktop.Platform.GL.default/x86_64/25.08"), "NVIDIA") {
 		t.Error("NVIDIA line without the driver")
 	}
 }
 
 func TestUserns(t *testing.T) {
-	for _, c := range []struct {
-		name, value string
-		bad         bool
-	}{
-		{"user.max_user_namespaces", "0", true},
-		{"user.max_user_namespaces", "15000", false},
-		{"kernel.unprivileged_userns_clone", "0", true},
-		{"kernel.unprivileged_userns_clone", "1", false},
-		{"kernel.apparmor_restrict_unprivileged_userns", "1", false},
-	} {
-		if p, _ := UsernsProblem(c.name, c.value); (p != "") != c.bad {
-			t.Errorf("UsernsProblem(%s, %s) = %q", c.name, c.value, p)
-		}
-	}
-
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "proc/sys/user"), 0o755)
 	os.MkdirAll(filepath.Join(root, "proc/sys/kernel"), 0o755)
 	os.WriteFile(filepath.Join(root, "proc/sys/user/max_user_namespaces"), []byte("63000\n"), 0o644)
 	os.WriteFile(filepath.Join(root, "proc/sys/kernel/unprivileged_userns_clone"), []byte("0\n"), 0o644)
 	d := &doctor{cfg: Config{Root: root, LookupEnv: func(string) (string, bool) { return "", false }}}
-	items := d.systemSection(d.systemInfo(), nil).Items
-	var fails, infos []string
-	for _, it := range items {
-		switch {
-		case it.Level == Fail:
-			fails = append(fails, it.Text)
-		case strings.Contains(it.Text, "user_namespaces"):
-			infos = append(infos, it.Text)
+	var got []string
+	for _, it := range d.systemSection(d.systemInfo(), nil).Items {
+		if strings.Contains(it.Text, "userns") || strings.Contains(it.Text, "namespaces") {
+			got = append(got, it.Text)
 		}
 	}
-	if len(fails) != 1 || !strings.Contains(fails[0], "unprivileged_userns_clone=0") {
-		t.Errorf("fails: %q", fails)
-	}
-	if len(infos) != 1 || infos[0] != "user.max_user_namespaces=63000" {
-		t.Errorf("infos: %q", infos)
+	// As they are, the missing one left out.
+	if want := []string{"user.max_user_namespaces=63000", "kernel.unprivileged_userns_clone=0"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("userns: %q", got)
 	}
 }
 
@@ -245,50 +198,6 @@ func TestRemotes(t *testing.T) {
 		t.Error("remotes from no output")
 	}
 
-	texts := func(ps []RemoteProblem) []string {
-		var out []string
-		for _, p := range ps {
-			out = append(out, p.Text)
-		}
-		return out
-	}
-	// A local repository is normally unsigned; an http one should not be.
-	got := texts(CheckRemotes(remotes, "--user"))
-	if !reflect.DeepEqual(got, []string{
-		"remote flatpark is disabled",
-		"remote test is not GPG-verified (no-gpg-verify)",
-	}) {
-		t.Errorf("CheckRemotes = %q", got)
-	}
-	if ps := CheckRemotes(remotes, "--system"); !strings.Contains(ps[0].Hint, "remote-modify --system --enable flatpark") {
-		t.Errorf("hint %q", ps[0].Hint)
-	}
-
-	// flathub and flatpark may be in any installation.
-	user := []Remote{{Name: "flatpark", URL: "https://dl.flatpark.org/"}}
-	system := []Remote{{Name: "flathub", URL: "https://dl.flathub.org/repo/"}}
-	if got := MissingRemotes([][]Remote{user, system}); got != nil {
-		t.Errorf("split between installations: %+v", got)
-	}
-	// A disabled one is still configured (and reported as disabled).
-	if got := MissingRemotes([][]Remote{remotes}); got != nil {
-		t.Errorf("all in one: %+v", got)
-	}
-	ps := MissingRemotes([][]Remote{user})
-	if got := texts(ps); len(got) != 1 || !strings.HasPrefix(got[0], "no remote named flathub in any installation") {
-		t.Errorf("without flathub: %q", got)
-	}
-	if ps[0].Hint != "flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo" {
-		t.Errorf("hint %q", ps[0].Hint)
-	}
-	// Once, whatever the number of installations.
-	if got := texts(MissingRemotes([][]Remote{nil, remotes[2:3], nil})); len(got) != 2 || got[1] != "no remote named flatpark in any installation" {
-		t.Errorf("neither: %q", got)
-	}
-	// Only names count: flathub's URL under another name is no flathub.
-	if got := texts(MissingRemotes([][]Remote{{{Name: "fh", URL: "https://dl.flathub.org/repo/"}, {Name: "flatpark"}}})); len(got) != 1 || !strings.HasPrefix(got[0], "no remote named flathub") {
-		t.Errorf("by URL: %q", got)
-	}
 }
 
 func TestList(t *testing.T) {
@@ -345,30 +254,6 @@ func TestLockHolders(t *testing.T) {
 	}
 }
 
-func TestVersions(t *testing.T) {
-	for _, c := range []struct {
-		version, latest string
-		behind, ok      bool
-	}{
-		{"v0.1.0", "v0.1.1", true, true},
-		{"v0.1.1", "v0.1.1", false, true},
-		{"v0.1.1-dirty", "v0.1.1", false, true},
-		{"v0.1.1-3-gabcdef0", "v0.1.1", false, true},
-		{"v0.1.0-3-gabcdef0-dirty", "v0.1.1", true, true},
-		{"v0.2.0", "v0.10.0", true, true},
-		{"v1.0", "v0.9.9", false, true},
-		{"dev", "v0.1.1", false, false},
-		{"34a4f7d", "v0.1.1", false, false},
-		{"v0.1.1", "", false, false},
-	} {
-		if behind, ok := Behind(c.version, c.latest); behind != c.behind || ok != c.ok {
-			t.Errorf("Behind(%s, %s) = %v %v", c.version, c.latest, behind, ok)
-		}
-	}
-}
-
-// extraDataServer serves files by path: HEAD and ranges like a normal
-// server, or, for paths under /nohead/, 405 for HEAD.
 func extraDataServer(t *testing.T, files map[string]int) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.UserAgent() != "rpak/test" {
@@ -414,38 +299,41 @@ func extraDataServer(t *testing.T, files map[string]int) *httptest.Server {
 
 func TestExtraDataCheck(t *testing.T) {
 	srv := extraDataServer(t, map[string]int{"/app.deb": 1000, "/nohead/app.deb": 1000, "/new.deb": 1200})
-	check := func(path string, size int64) (ExtraDataCheck, Level, string) {
+	check := func(path string, size int64) (ExtraDataCheck, string) {
 		c := ExtraDataCheck{Source: metadata.Source{Name: "app.deb", Size: size, URI: srv.URL + path}}
 		c.URL = CheckURL(context.Background(), srv.Client(), c.Source.URI, "test", 5*time.Second)
-		level, what := c.Judge()
-		return c, level, what
+		return c, c.Text()
 	}
 	for _, c := range []struct {
 		path   string
-		level  Level
-		what   string
+		size   int64
+		text   string
 		ranged bool
 	}{
-		{"/app.deb", OK, "HTTP 200, 1.0 kB as pinned", false},
-		{"/moved/app.deb", OK, "HTTP 200, 1.0 kB as pinned", false},
-		{"/missing.deb", Fail, "HTTP 404", true},
-		{"/new.deb", Fail, "the server has 1.2 kB, pinned 1.0 kB: the developer replaced the file and the pin is not updated yet", false},
+		// Both sizes, also where they are the same.
+		{"/app.deb", 1000, "HTTP 200, 1.0 kB (pinned 1.0 kB)", false},
+		{"/moved/app.deb", 1000, "HTTP 200, 1.0 kB (pinned 1.0 kB)", false},
+		{"/missing.deb", 1000, "HTTP 404 (pinned 1.0 kB)", true},
+		{"/new.deb", 1000, "HTTP 200, 1.2 kB (pinned 1.0 kB)", false},
 		// HEAD refused: a one-byte GET, whose Content-Range has the size.
-		{"/nohead/app.deb", OK, "HTTP 206, 1.0 kB as pinned", true},
+		{"/nohead/app.deb", 1000, "HTTP 206, 1.0 kB (pinned 1.0 kB)", true},
+		// Different sizes that look the same rounded: in bytes.
+		{"/nohead/app.deb", 1001, "HTTP 206, 1000 bytes (pinned 1001 bytes)", true},
 	} {
-		got, level, what := check(c.path, 1000)
-		if level != c.level || what != c.what || got.URL.Ranged != c.ranged {
-			t.Errorf("%s: %v %q ranged %v, want %v %q %v", c.path, level, what, got.URL.Ranged, c.level, c.what, c.ranged)
+		got, text := check(c.path, c.size)
+		if text != c.text || got.URL.Ranged != c.ranged {
+			t.Errorf("%s: %q ranged %v, want %q %v", c.path, text, got.URL.Ranged, c.text, c.ranged)
 		}
 	}
-	if _, level, what := check("/nohead/app.deb", 999); level != Fail || !strings.Contains(what, "replaced") {
-		t.Errorf("ranged size mismatch: %v %q", level, what)
+	unsized := ExtraDataCheck{Source: metadata.Source{Size: 1000}, URL: URLCheck{Status: 200, Length: -1}}
+	if got := unsized.Text(); got != "HTTP 200, size not given (pinned 1.0 kB)" {
+		t.Errorf("no size: %q", got)
 	}
 
 	// No answer at all: a connection error, named as such.
 	srv.Close()
-	if _, level, what := check("/app.deb", 1000); level != Fail || what != "connection refused" {
-		t.Errorf("closed server: %v %q", level, what)
+	if _, text := check("/app.deb", 1000); !strings.HasPrefix(text, "connection refused after ") || !strings.HasSuffix(text, "s (pinned 1.0 kB)") {
+		t.Errorf("closed server: %q", text)
 	}
 }
 
@@ -455,8 +343,8 @@ func TestCheckURLTimeout(t *testing.T) {
 	defer srv.Close()
 	defer close(block)
 	c := CheckURL(context.Background(), srv.Client(), srv.URL, "test", 100*time.Millisecond)
-	if c.Problem() != "timeout" {
-		t.Errorf("Problem = %q (%v)", c.Problem(), c.Err)
+	if c.Outcome() != "timeout" || !strings.HasPrefix(c.Timed(), "timeout after 0.1") {
+		t.Errorf("Outcome = %q, Timed = %q (%v)", c.Outcome(), c.Timed(), c.Err)
 	}
 }
 
@@ -523,12 +411,12 @@ func TestGPUs(t *testing.T) {
 		d := &doctor{cfg: Config{Root: root, LookupEnv: func(string) (string, bool) { return "", false }}}
 		return d.systemSection(d.systemInfo(), nil).Items
 	}
-	// lines are the GPU, hybrid and NVIDIA lines, marked as printed.
+	// lines are the GPU, hybrid and NVIDIA lines, as printed.
 	lines := func(items []Item) []string {
 		var out []string
 		for _, it := range items {
 			if strings.HasPrefix(it.Text, "GPU") || strings.HasPrefix(it.Text, "hybrid") || strings.HasPrefix(it.Text, "NVIDIA") {
-				out = append(out, map[Level]string{Info: " ", OK: "✓", Warn: "!", Fail: "✗"}[it.Level]+" "+it.Text)
+				out = append(out, "  "+it.Text)
 			}
 		}
 		return out
@@ -545,18 +433,16 @@ func TestGPUs(t *testing.T) {
 			"  GPU card0: Intel 8086:a7a0, driver i915 (boot)",
 			"  GPU card1: NVIDIA 10de:2860, driver nvidia",
 			"  hybrid graphics: Intel + NVIDIA",
-			// The extension check as before.
-			"✗ NVIDIA driver 580.95.05, but org.freedesktop.Platform.GL.nvidia-580-95-05 is not installed: apps fall back to software rendering or do not start",
+			"  NVIDIA driver 580.95.05",
 		}},
 		{"NVIDIA without its version", "", []card{intel, {"card1", "10de", "2860", "nvidia", false}}, []string{
 			"  GPU card0: Intel 8086:a7a0, driver i915 (boot)",
 			"  GPU card1: NVIDIA 10de:2860, driver nvidia",
 			"  hybrid graphics: Intel + NVIDIA",
-			"! NVIDIA card1 uses the nvidia driver, but /proc/driver/nvidia/version does not exist: the GL.nvidia extension apps need is unknown",
+			"  NVIDIA driver version: /proc/driver/nvidia/version does not exist",
 		}},
 		{"NVIDIA with nouveau", "", []card{{"card0", "10de", "1c82", "nouveau", true}}, []string{
 			"  GPU card0: NVIDIA 10de:1c82, driver nouveau (boot)",
-			"  NVIDIA card0 uses nouveau, which Mesa drives through GL.default: no GL.nvidia extension is needed",
 		}},
 		{"AMD", "", []card{{"card1", "1002", "73df", "amdgpu", true}}, []string{"  GPU card1: AMD 1002:73df, driver amdgpu (boot)"}},
 		{"other vendor", "", []card{{"card0", "1af4", "1050", "virtio_gpu", false}}, []string{"  GPU card0: 1af4:1050, driver virtio_gpu"}},
@@ -571,15 +457,12 @@ func TestGPUs(t *testing.T) {
 			"  GPU card1: NVIDIA 10de:2860, no driver",
 		}},
 		{"no cards", "", nil, []string{"  GPU: none found in /sys/class/drm"}},
+		// The driver's version without the cards (a container).
+		{"no cards, NVIDIA driver", "580.95.05", nil, []string{"  GPU: none found in /sys/class/drm", "  NVIDIA driver 580.95.05"}},
 	} {
 		items := run(c.nvidia, c.cards...)
 		if got := lines(items); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n%s\nwant:\n%s", c.name, strings.Join(got, "\n"), strings.Join(c.want, "\n"))
-		}
-		for _, it := range items {
-			if it.Level == Warn && it.Hint == "" {
-				t.Errorf("%s: %q has no hint", c.name, it.Text)
-			}
 		}
 	}
 	// No /sys at all.
@@ -597,31 +480,23 @@ func TestEOL(t *testing.T) {
 		t.Errorf("ShortRef(app/...) = %q", got)
 	}
 	eol := ",eol=org.freedesktop.Platform 24.08 is no longer receiving fixes"
-	unrelated := []listEntry{
+	runtimes := []listEntry{
 		{"org.freedesktop.Platform/x86_64/24.08", "system,runtime" + eol},
 		{"org.freedesktop.Platform.GL.default/x86_64/24.08", "system,runtime" + eol},
-		{"org.freedesktop.Platform.GL.default/x86_64/24.08extra", "system,runtime" + eol},
 		{"org.freedesktop.Platform.VAAPI.Intel/x86_64/24.08", "system,runtime" + eol},
 		{"org.kde.Platform/x86_64/5.15-24.08", "system,runtime,eol=We strongly recommend moving to the latest stable version"},
 		{"org.gnome.Platform/x86_64/49", "system,runtime"},
 	}
-	// run reports on a system installation with the runtimes and an app
-	// org.example.App on runtime, if given; apps are the ids checked.
-	run := func(runtimes []listEntry, runtime string, apps ...string) Report {
-		in := &instInfo{exists: true, writable: true, free: lowSpace, runtimes: refList{refs: runtimes}, remotes: []Remote{{Name: "flathub"}, {Name: "flatpark"}}}
+	// run reports on a system installation with the runtimes and apps, and
+	// on an app org.example.App on runtime, if given.
+	run := func(runtimes, apps []listEntry, runtime string, info map[string]string) Report {
+		in := &instInfo{exists: true, runtimes: refList{refs: runtimes}, apps: refList{refs: apps}}
 		in.inst.ID = "default"
-		var checked []*appInfo
-		for _, id := range apps {
-			a := &appInfo{id: id, checked: true}
-			if runtime != "" {
-				a.insts = []*appInst{{in: in, info: map[string]string{"Ref": "app/" + id + "/x86_64/stable", "Runtime": runtime}}}
-				in.apps.refs = append(in.apps.refs, listEntry{ref: id + "/x86_64/stable", options: "system,current"})
-			}
-			checked = append(checked, a)
-		}
-		d := &doctor{cfg: Config{Apps: apps, LookupEnv: func(string) (string, bool) { return "", false }}}
-		sections := []Section{d.installationsSection([]*instInfo{in}, checked)}
-		for _, a := range checked {
+		d := &doctor{cfg: Config{LookupEnv: func(string) (string, bool) { return "", false }}}
+		sections := []Section{d.installationsSection([]*instInfo{in})}
+		if runtime != "" {
+			info["Ref"], info["Runtime"] = "app/org.example.App/x86_64/stable", runtime
+			a := &appInfo{id: "org.example.App", checked: true, insts: []*appInst{{in: in, info: info}}}
 			sections = append(sections, d.appSection(a, []*instInfo{in}, psInfo{}))
 		}
 		return Report{Sections: sections}
@@ -631,69 +506,42 @@ func TestEOL(t *testing.T) {
 		for _, s := range r.Sections {
 			for _, it := range s.Items {
 				if strings.Contains(it.Text, "end-of-life") {
-					out = append(out, map[Level]string{Info: " ", Warn: "!"}[it.Level]+" "+it.Text)
+					out = append(out, it.Text)
 				}
 			}
 		}
 		return out
 	}
-	const five = "org.freedesktop.Platform//24.08, org.freedesktop.Platform.GL.default//24.08, org.freedesktop.Platform.GL.default//24.08extra, org.freedesktop.Platform.VAAPI.Intel//24.08, org.kde.Platform//5.15-24.08"
 
-	// The app's runtime is end-of-life: a problem in its section, with the
-	// reason; the others one line, not a problem.
-	r := run(unrelated, "org.freedesktop.Platform/x86_64/24.08", "org.example.App")
+	// One line for the installation, all of them, runtimes first; the
+	// app's runtime with its reason in the app's section.
+	apps := []listEntry{{"org.example.Old/x86_64/stable", "system,current,eol=gone"}, {"org.example.App/x86_64/stable", "system,current"}}
+	got := eolItems(run(runtimes, apps, "org.freedesktop.Platform/x86_64/24.08", map[string]string{}))
 	want := []string{
-		"  4 end-of-life runtimes not used by the apps checked: org.freedesktop.Platform.GL.default//24.08, org.freedesktop.Platform.GL.default//24.08extra, org.freedesktop.Platform.VAAPI.Intel//24.08, org.kde.Platform//5.15-24.08",
-		"! runtime org.freedesktop.Platform/x86_64/24.08 (System installation (default)) is end-of-life: org.freedesktop.Platform 24.08 is no longer receiving fixes",
+		"end-of-life: org.freedesktop.Platform//24.08, org.freedesktop.Platform.GL.default//24.08, org.freedesktop.Platform.VAAPI.Intel//24.08, org.kde.Platform//5.15-24.08, org.example.Old//stable",
+		"runtime: org.freedesktop.Platform/x86_64/24.08  installed in System installation (default)  end-of-life: org.freedesktop.Platform 24.08 is no longer receiving fixes",
 	}
-	if got := eolItems(r); !reflect.DeepEqual(got, want) {
-		t.Errorf("app's runtime end-of-life:\n%s", strings.Join(got, "\n"))
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("runtime end-of-life:\n%s", strings.Join(got, "\n"))
 	}
-	if ps := r.Problems(); len(ps) != 1 || !strings.HasPrefix(ps[0].Text, "runtime org.freedesktop.Platform/x86_64/24.08") {
-		t.Errorf("problems: %+v", ps)
+	// The app itself, and its rename.
+	got = eolItems(run(runtimes[4:], nil, "org.gnome.Platform/x86_64/49", map[string]string{"End-of-life": "use the new one", "End-of-life-rebase": "org.example.New"}))
+	if want := []string{"ref: app/org.example.App/x86_64/stable  end-of-life: use the new one; end-of-life-rebase: org.example.New"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("app end-of-life:\n%s", strings.Join(got, "\n"))
 	}
-
-	// Only end-of-life refs the app does not use: no problem.
-	r = run(unrelated, "org.gnome.Platform/x86_64/49", "org.example.App")
-	if got := eolItems(r); !reflect.DeepEqual(got, []string{"  5 end-of-life runtimes not used by the apps checked: " + five}) {
-		t.Errorf("unrelated end-of-life:\n%s", strings.Join(got, "\n"))
-	}
-	if ps := r.Problems(); len(ps) != 0 {
-		t.Errorf("problems: %+v", ps)
-	}
-	// An app that is not installed uses nothing.
-	if got := eolItems(run(unrelated, "", "org.example.Gone")); !reflect.DeepEqual(got, []string{"  5 end-of-life runtimes not used by the apps checked: " + five}) {
-		t.Errorf("app not installed:\n%s", strings.Join(got, "\n"))
+	// Nothing end-of-life: no line.
+	if got := eolItems(run(runtimes[4:], nil, "", nil)); got != nil {
+		t.Errorf("none: %q", got)
 	}
 
-	// No app: one problem per installation, without the reasons.
-	r = run(unrelated, "")
-	if got := eolItems(r); !reflect.DeepEqual(got, []string{"! 5 end-of-life runtimes: " + five}) {
-		t.Errorf("no app:\n%s", strings.Join(got, "\n"))
-	}
-	ps := r.Problems()
-	if len(ps) != 1 || ps[0].Context != "System installation (default)" ||
-		ps[0].Hint != `flatpak update --system; if the apps still need it, they have to move on first; "flatpak uninstall --system --unused" removes unused runtimes` {
-		t.Errorf("problems: %+v", ps)
-	}
-
-	// More than eolListed: the first ones and a count; one is one.
+	// More than listed: the first ones and a count; the same id//branch of
+	// two arches once.
 	var many []listEntry
 	for i := range 11 {
 		many = append(many, listEntry{fmt.Sprintf("org.example.R%d/x86_64/1", i), "runtime,eol=old"})
 	}
-	if got := eolItems(run(many, "")); !reflect.DeepEqual(got, []string{"! 11 end-of-life runtimes: org.example.R0//1, org.example.R1//1, org.example.R2//1, org.example.R3//1, org.example.R4//1, org.example.R5//1, org.example.R6//1, org.example.R7//1, and 3 more"}) {
+	many = append(many, listEntry{"org.example.R0/i386/1", "runtime,eol=old"})
+	if got := eolItems(run(many, nil, "", nil)); !reflect.DeepEqual(got, []string{"end-of-life: org.example.R0//1, org.example.R1//1, org.example.R2//1, org.example.R3//1, org.example.R4//1, org.example.R5//1, org.example.R6//1, org.example.R7//1, and 3 more"}) {
 		t.Errorf("many:\n%s", strings.Join(got, "\n"))
-	}
-	if got := eolItems(run(many[:1], "")); !reflect.DeepEqual(got, []string{"! 1 end-of-life runtime: org.example.R0//1"}) {
-		t.Errorf("one:\n%s", strings.Join(got, "\n"))
-	}
-	// Apps, besides runtimes; the same id//branch of two arches once.
-	if got := EOLSummary([]string{"a//1"}, []string{"b//stable", "c//stable"}, true); got != "1 end-of-life runtime and 2 apps other than the apps checked and their runtimes: a//1, b//stable, c//stable" {
-		t.Errorf("EOLSummary with apps: %q", got)
-	}
-	twoArches := []listEntry{{"org.example.R/x86_64/1", "runtime,eol=old"}, {"org.example.R/i386/1", "runtime,eol=old"}}
-	if got := eolItems(run(twoArches, "")); !reflect.DeepEqual(got, []string{"! 1 end-of-life runtime: org.example.R//1"}) {
-		t.Errorf("two arches:\n%s", strings.Join(got, "\n"))
 	}
 }

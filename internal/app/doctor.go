@@ -12,24 +12,24 @@ import (
 const doctorUsage = `Usage: rpak doctor [APP_ID]...
 
 Collects what is needed to look into a problem: rpak, flatpak and the
-system, the environment variables that matter, the installations and
-their remotes, the extra-data directory and whether the remotes can be
-reached. With app ids, also each app: where it is installed, its runtime,
-permissions and overrides, and whether its extra-data files can be
-downloaded, those of the installed commit and of the remote's current one
-(or, for an app that is not installed, of every remote that has it). What
-looks wrong is marked, and summed up with what to do about it at the end.
+system, the environment variables that matter, the graphics cards, the
+installations and their remotes, the extra-data directory and how the
+remotes answer. With app ids, also each app: where it is installed, its
+runtime, permissions and overrides, and how the servers of its extra-data
+files answer, for the installed commit and the remote's current one (or,
+for an app that is not installed, for every remote that has it).
 
-When reporting a problem, paste the whole output into the issue. Home
-directories and user names are replaced, passwords in proxy URLs hidden,
-and the files shared with an app through the document portal are only
-counted.
+It reports what it finds and measures, and judges none of it: what the
+report means is for the maintainers to read. When reporting a problem,
+paste the whole output into the issue. Home directories and user names
+are replaced, passwords in proxy URLs hidden, and the files shared with an
+app through the document portal are only counted.
 
 doctor only reads: it changes no files and takes no locks. It needs the
 network: at most 15 seconds for a remote's summary and 10 for each other
 check, all at once.
 
-Exits with 1 if it found a problem marked ✗, else 0.
+Exits with 0 once it has collected the report, whatever it found.
 
 Options:
   -h, --help     show this help
@@ -56,72 +56,35 @@ func doctorCommand(version string, argv []string, stdout, stderr io.Writer) int 
 		}
 	}
 	report := doctor.Run(context.Background(), doctor.NewConfig(version, flatpakPath(), apps))
-	writeReport(stdout, detectTerm(stdout).color, report)
-	if report.Failed() {
+	if err := writeReport(stdout, report); err != nil {
+		fmt.Fprintf(stderr, "rpak doctor: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-// The marks of the report's items; a heading has none, a fact two spaces.
-var doctorMarks = map[doctor.Level]seg{
-	doctor.Info: {"  ", ""},
-	doctor.OK:   {"✓ ", sgrGreen},
-	doctor.Warn: {"! ", sgrYellow},
-	doctor.Fail: {"✗ ", sgrRed},
-}
-
 // writeReport prints the report as plain text for an issue: sections, an
-// item per line with blocks indented below it, and the problems with what
-// to do about them at the end. Lines are not cut to the terminal: all of
-// it is meant to be copied.
-func writeReport(w io.Writer, color bool, r doctor.Report) {
-	var lines []line
-	add := func(l line) { lines = append(lines, l) }
-	text := func(s string) line { return line{{s, ""}} }
-	item := func(it doctor.Item) {
-		add(line{doctorMarks[it.Level], {it.Text, ""}})
-		if it.Block != "" {
-			for _, b := range strings.Split(it.Block, "\n") {
-				add(text(strings.TrimRight("      "+b, " \t")))
-			}
-		}
-	}
-
-	add(text("Paste all of this into the issue, between lines of three backticks (```)."))
+// item per line, indented, with blocks indented further below it. There is
+// no colour, and lines are not cut to the terminal: all of it is meant to
+// be copied.
+func writeReport(w io.Writer, r doctor.Report) error {
+	var b strings.Builder
+	b.WriteString("Paste all of this into the issue, between lines of three backticks (```).\n")
 	for _, s := range r.Sections {
-		add(nil)
-		add(line{{"== " + s.Title, sgrBold}})
+		b.WriteString("\n== " + s.Title + "\n")
 		for _, it := range s.Items {
 			if it.Head {
-				add(line{{it.Text, sgrBold}})
+				b.WriteString(it.Text + "\n")
 				continue
 			}
-			item(it)
+			b.WriteString("  " + it.Text + "\n")
+			if it.Block != "" {
+				for _, l := range strings.Split(it.Block, "\n") {
+					b.WriteString(strings.TrimRight("      "+l, " \t") + "\n")
+				}
+			}
 		}
 	}
-
-	add(nil)
-	add(line{{"== Problems", sgrBold}})
-	problems := r.Problems()
-	if len(problems) == 0 {
-		add(line{doctorMarks[doctor.OK], {"none found", ""}})
-	}
-	for _, p := range problems {
-		ctx := ""
-		if p.Context != "" {
-			ctx = p.Context + ": "
-		}
-		add(line{doctorMarks[p.Level], {ctx + p.Text, ""}})
-		if p.Hint != "" {
-			add(line{{"    → " + p.Hint, sgrFaint}})
-		}
-	}
-
-	var b strings.Builder
-	for _, l := range lines {
-		b.WriteString(l.render(color))
-		b.WriteByte('\n')
-	}
-	io.WriteString(w, b.String())
+	_, err := io.WriteString(w, b.String())
+	return err
 }

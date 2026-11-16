@@ -53,57 +53,6 @@ func ParseRemotes(out string) []Remote {
 	return remotes
 }
 
-// RemoteProblem is a judgement on the remotes of an installation.
-type RemoteProblem struct {
-	Remote string // "" for the installation as a whole
-	Text   string
-	Hint   string
-}
-
-// CheckRemotes judges an installation's remotes by their options: a
-// disabled remote gives nothing, and one without GPG verification is not
-// checked against a signing key. A local repository (file:, a build or
-// an installed bundle) is normally unsigned, so that is not a problem
-// there. inst is the option of the installation, for the hints.
-func CheckRemotes(remotes []Remote, inst string) []RemoteProblem {
-	var out []RemoteProblem
-	for _, r := range remotes {
-		if r.Has("disabled") {
-			out = append(out, RemoteProblem{r.Name, fmt.Sprintf("remote %s is disabled", r.Name),
-				fmt.Sprintf("flatpak remote-modify %s --enable %s", inst, r.Name)})
-		}
-		if r.Has("no-gpg-verify") && !strings.HasPrefix(r.URL, "file:") {
-			out = append(out, RemoteProblem{r.Name, fmt.Sprintf("remote %s is not GPG-verified (no-gpg-verify)", r.Name),
-				fmt.Sprintf("add it again from its .flatpakrepo file, which carries the key; or flatpak remote-modify %s --gpg-import=KEYFILE %s", inst, r.Name)})
-		}
-	}
-	return out
-}
-
-// MissingRemotes judges the remotes of all installations in use together,
-// by name only: FlatPark's apps need a flatpark remote, their runtimes
-// mostly a flathub one. Either may be in any installation, since apps use
-// runtimes from other installations too; only if none has one is it
-// missing, and the hint is the per-user setup of FlatPark's docs.
-func MissingRemotes(remoteLists [][]Remote) []RemoteProblem {
-	have := map[string]bool{}
-	for _, list := range remoteLists {
-		for _, r := range list {
-			have[r.Name] = true
-		}
-	}
-	var out []RemoteProblem
-	if !have["flathub"] {
-		out = append(out, RemoteProblem{"", "no remote named flathub in any installation: the runtimes of most apps come from Flathub",
-			"flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo"})
-	}
-	if !have["flatpark"] {
-		out = append(out, RemoteProblem{"", "no remote named flatpark in any installation",
-			"flatpak remote-add --user --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo (https://flatpark.org/docs/users/setup/)"})
-	}
-	return out
-}
-
 // listEntry is a line of `flatpak list --columns=ref,options`.
 type listEntry struct {
 	ref     string
@@ -359,27 +308,15 @@ func (d *doctor) commName(pid int) string {
 	return strings.TrimSpace(string(b))
 }
 
-// used reports whether an installation is in use: it has remotes or
-// something installed. A system installation nobody uses has neither.
-func (in *instInfo) used() bool {
-	return len(in.remotes) > 0 || len(in.apps.refs) > 0 || len(in.runtimes.refs) > 0
-}
-
-// lowSpace is when free space becomes a problem: apps and their updates
-// often need more.
-const lowSpace = 2 << 30
-
-func (d *doctor) installationsSection(insts []*instInfo, apps []*appInfo) Section {
+func (d *doctor) installationsSection(insts []*instInfo) Section {
 	s := d.section("Installations")
-	r := d.r
-	used := usedRefs(apps)
 	for _, in := range insts {
-		s.head(in.inst.Title(), "%s: %s", in.inst.Title(), in.inst.Path)
+		s.head("%s: %s", in.inst.Title(), in.inst.Path)
 		if !in.exists {
 			if in.statErr != nil && !errors.Is(in.statErr, fs.ErrNotExist) {
-				s.add(Warn, "cannot read the installation: %v", in.statErr).hint(r, "check the permissions of %s", in.inst.Path)
+				s.add("installation directory: %v", in.statErr)
 			} else {
-				s.add(Info, "does not exist")
+				s.add("does not exist")
 			}
 			continue
 		}
@@ -387,14 +324,10 @@ func (d *doctor) installationsSection(insts []*instInfo, apps []*appInfo) Sectio
 		if in.writable {
 			access = "writable"
 		}
-		switch {
-		case in.freeErr != nil:
-			s.add(Info, "%s; free space unknown: %v", access, in.freeErr)
-		case in.free < lowSpace:
-			s.add(Warn, "%s; only %s free", access, units.Size(int64(in.free))).
-				hint(r, "free some space; \"rpak clean\" removes what flatpak leaves behind")
-		default:
-			s.add(OK, "%s; %s free", access, units.Size(int64(in.free)))
+		if in.freeErr != nil {
+			s.add("%s, free space: %v", access, in.freeErr)
+		} else {
+			s.add("%s, %s free", access, units.Size(int64(in.free)))
 		}
 		for _, l := range in.locks {
 			name := filepath.Base(filepath.Dir(l.Path)) + "/" + filepath.Base(l.Path)
@@ -403,105 +336,63 @@ func (d *doctor) installationsSection(insts []*instInfo, apps []*appInfo) Sectio
 			}
 			switch {
 			case l.Err != nil:
-				s.add(Info, "%s: cannot check the lock: %v", name, l.Err)
+				s.add("%s: %v", name, l.Err)
 			case l.Busy && l.PID > 0:
-				s.add(Warn, "%s is locked by pid %d (%s): another flatpak transaction is running", name, l.PID, d.commName(l.PID)).
-					hint(r, "wait for it (a software center or an automatic update) to finish, then try again")
+				s.add("%s: locked by pid %d (%s)", name, l.PID, d.commName(l.PID))
 			case l.Busy:
-				s.add(Warn, "%s is locked (holder unknown): another flatpak transaction is running", name).
-					hint(r, "wait for it (a software center or an automatic update) to finish, then try again")
+				s.add("%s: locked (holder unknown)", name)
 			default:
-				s.add(OK, "%s is not locked", name)
+				s.add("%s: not locked", name)
 			}
 		}
 
 		if errors.Is(in.remotesErr, errNoFlatpak) {
 			// Said once, with the flatpak line.
-			s.add(Info, "remotes and refs not checked: %v", in.remotesErr)
+			s.add("remotes and refs: not listed, no flatpak command is run")
 		} else {
-			d.refsItems(s, in, used)
+			d.refsItems(s, in)
 		}
 		d.overrideItems(s, in)
-	}
-
-	// Across the installations, if their remotes could be listed at all.
-	var lists [][]Remote
-	listed := false
-	for _, in := range insts {
-		if in.exists && in.remotesErr == nil {
-			listed = true
-			if in.used() {
-				lists = append(lists, in.remotes)
-			}
-		}
-	}
-	if listed {
-		s.head("Installations", "All installations")
-		problems := MissingRemotes(lists)
-		for _, p := range problems {
-			s.add(Warn, "%s", p.Text).hint(r, "%s", p.Hint)
-		}
-		if len(problems) == 0 {
-			s.add(OK, "remotes named flathub and flatpark are configured")
-		}
 	}
 	return s.done()
 }
 
-// refsItems are the remotes and what is installed; used are the refs of
-// the apps checked, see usedRefs.
-func (d *doctor) refsItems(s *builder, in *instInfo, used map[string]bool) {
-	r := d.r
+// refsItems are the remotes and what is installed.
+func (d *doctor) refsItems(s *builder, in *instInfo) {
 	if in.remotesErr != nil {
-		s.add(Warn, "cannot list the remotes: %v", in.remotesErr).hint(r, "flatpak repair %s", in.inst.Option())
+		s.add("remotes: %v", in.remotesErr)
 	}
 	for _, rem := range in.remotes {
 		opts := strings.Join(rem.Options, ",")
 		if opts != "" {
 			opts = ", " + opts
 		}
-		s.add(Info, "remote %s  %s  (priority %s%s)", rem.Name, RedactURL(rem.URL), rem.Priority, opts)
-	}
-	if in.remotesErr == nil && in.used() {
-		for _, p := range CheckRemotes(in.remotes, in.inst.Option()) {
-			s.add(Warn, "%s", p.Text).hint(r, "%s", p.Hint)
-		}
+		s.add("remote %s  %s  (priority %s%s)", rem.Name, RedactURL(rem.URL), rem.Priority, opts)
 	}
 
 	counts := func(l refList, what string) string {
 		if l.err != nil {
-			return what + ": unknown (" + l.err.Error() + ")"
+			return what + ": " + l.err.Error()
 		}
 		return fmt.Sprintf("%d %s", len(l.refs), what)
 	}
-	s.add(Info, "%s, %s", counts(in.apps, "apps"), counts(in.runtimes, "runtimes"))
+	s.add("%s, %s", counts(in.apps, "apps"), counts(in.runtimes, "runtimes"))
 
-	// The end-of-life refs of the apps checked are in their sections, with
-	// the reason; the others are one line, a problem only if no app is
-	// checked: there are often many, and they rarely explain a problem.
-	var runtimes, apps []string
+	// Short, and without the reasons, which are long and mostly the same;
+	// the app sections give the reasons for the apps checked.
+	var eol []string
 	seen := map[string]bool{}
-	for i, l := range []refList{in.runtimes, in.apps} {
+	for _, l := range []refList{in.runtimes, in.apps} {
 		for _, e := range l.refs {
 			short := ShortRef(e.ref)
-			if _, ok := e.eol(); !ok || used[e.ref] || seen[short] {
-				continue
-			}
-			seen[short] = true
-			if i == 0 {
-				runtimes = append(runtimes, short)
-			} else {
-				apps = append(apps, short)
+			if _, ok := e.eol(); ok && !seen[short] {
+				seen[short] = true
+				eol = append(eol, short)
 			}
 		}
 	}
-	switch {
-	case len(runtimes)+len(apps) == 0:
-	case len(d.cfg.Apps) > 0:
-		s.add(Info, "%s", EOLSummary(runtimes, apps, true))
-	default:
-		s.add(Warn, "%s", EOLSummary(runtimes, apps, false)).
-			hint(r, "flatpak update %s; if the apps still need it, they have to move on first; \"flatpak uninstall %s --unused\" removes unused runtimes", in.inst.Option(), in.inst.Option())
+	if len(eol) > 0 {
+		s.add("end-of-life: %s", ShortList(eol))
 	}
 }
 
@@ -518,72 +409,27 @@ func ShortRef(ref string) string {
 	return parts[0] + "//" + parts[2]
 }
 
-// eolListed is how many refs EOLSummary names.
-const eolListed = 8
+// listed is how many entries ShortList names.
+const listed = 8
 
-// EOLSummary is the line of an installation's end-of-life refs (short,
-// runtimes first): "5 end-of-life runtimes: a//1, b//2, ...", the first
-// eolListed of them named. checked says that apps are checked and these
-// are the others.
-func EOLSummary(runtimes, apps []string, checked bool) string {
-	plural := func(n int, what string) string {
-		if n == 1 {
-			return "1 " + what
-		}
-		return strconv.Itoa(n) + " " + what + "s"
+// ShortList joins the first listed entries, and says how many more there
+// are: "a, b, ..., and 3 more".
+func ShortList(list []string) string {
+	text := strings.Join(list[:min(len(list), listed)], ", ")
+	if len(list) > listed {
+		text += fmt.Sprintf(", and %d more", len(list)-listed)
 	}
-	var what string
-	switch {
-	case len(apps) == 0:
-		what = plural(len(runtimes), "end-of-life runtime")
-	case len(runtimes) == 0:
-		what = plural(len(apps), "end-of-life app")
-	default:
-		what = plural(len(runtimes), "end-of-life runtime") + " and " + plural(len(apps), "app")
-	}
-	if checked {
-		if len(apps) == 0 {
-			what += " not used by the apps checked"
-		} else {
-			what += " other than the apps checked and their runtimes"
-		}
-	}
-	refs := append(append([]string{}, runtimes...), apps...)
-	list := strings.Join(refs[:min(len(refs), eolListed)], ", ")
-	if len(refs) > eolListed {
-		list += fmt.Sprintf(", and %d more", len(refs)-eolListed)
-	}
-	return what + ": " + list
-}
-
-// usedRefs are the refs, as flatpak list names them, of the apps checked
-// and of their runtimes, in any installation: their end-of-life is said
-// in the app sections.
-func usedRefs(apps []*appInfo) map[string]bool {
-	used := map[string]bool{}
-	for _, a := range apps {
-		for _, ai := range a.insts {
-			if ref := ai.info["Ref"]; ref != "" {
-				used[strings.TrimPrefix(ref, "app/")] = true
-			}
-			if rt := ai.info["Runtime"]; rt != "" {
-				used[strings.TrimPrefix(rt, "runtime/")] = true
-			}
-		}
-	}
-	return used
+	return text
 }
 
 // overrideItems are the overrides, which flatpak is not needed to read.
 func (d *doctor) overrideItems(s *builder, in *instInfo) {
-	r := d.r
 	if in.hasGlobal {
-		s.add(Warn, "global override (%s): applies to every app", filepath.Join(in.inst.Path, "overrides", "global")).
-			block(r, strings.TrimRight(in.global, "\n")).
-			hint(r, "a global override is the most common source of surprises; review it with \"flatpak override %s --show\", remove it with \"flatpak override %s --reset\" (https://flatpark.org/docs/users/override/)", in.inst.Option(), in.inst.Option())
+		s.add("global override %s:", filepath.Join(in.inst.Path, "overrides", "global")).
+			block(d.r, strings.TrimRight(in.global, "\n"))
 	}
 	if len(in.overrides) > 0 {
-		s.add(Info, "apps with an override: %s", strings.Join(in.overrides, ", "))
+		s.add("apps with an override: %s", strings.Join(in.overrides, ", "))
 	}
 }
 
@@ -678,29 +524,25 @@ func dryRunClean(insts []*instInfo) int64 {
 
 func (d *doctor) extraDataSection(x extraDataInfo) Section {
 	s := d.section("Extra-data directory")
-	r := d.r
 	switch {
 	case x.dir == "":
-		s.add(Warn, "cannot find the flatpak user directory: %v", x.err).hint(r, "set HOME")
+		s.add("flatpak user directory: %v", x.err)
 		return s.done()
 	case x.err != nil:
-		s.add(Warn, "%s: %v", x.dir, x.err).hint(r, "check the permissions of %s", x.dir)
+		s.add("%s: %v", x.dir, x.err)
 	case !x.exists:
-		s.add(OK, "%s: does not exist (nothing prefetched)", x.dir)
+		s.add("%s: does not exist", x.dir)
 	default:
-		s.add(Info, "%s: %d entries, %s", x.dir, x.entries, units.Size(x.size))
+		s.add("%s: %d entries, %s", x.dir, x.entries, units.Size(x.size))
 		if x.parts > 0 {
-			s.add(Warn, "%d partial downloads (.part), %s", x.parts, units.Size(x.partSz)).
-				hint(r, "they are resumed by the next install or update; \"rpak clean\" removes them")
+			s.add("%d partial downloads (.part), %s", x.parts, units.Size(x.partSz))
 		}
 	}
 	switch {
 	case !x.cleanDone:
-		s.add(Info, "what \"rpak clean\" can free takes long to work out; see \"rpak clean --dry-run\"")
-	case x.freeable > 0:
-		s.add(Info, "\"rpak clean\" can free %s (see \"rpak clean --dry-run\")", units.Size(x.freeable))
+		s.add("\"rpak clean\" can free: not worked out within %s; see \"rpak clean --dry-run\"", seconds(d.cfg.CleanTimeout))
 	default:
-		s.add(OK, "\"rpak clean\" has nothing to free")
+		s.add("\"rpak clean\" can free %s (see \"rpak clean --dry-run\")", units.Size(x.freeable))
 	}
 	return s.done()
 }

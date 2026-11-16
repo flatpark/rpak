@@ -27,15 +27,22 @@ type URLCheck struct {
 // OK reports whether the URL answered with a 2xx status.
 func (c URLCheck) OK() bool { return c.Err == nil && c.Status >= 200 && c.Status < 300 }
 
-// Problem is what went wrong in a few words, "" if nothing did.
-func (c URLCheck) Problem() string {
-	switch {
-	case c.Err != nil:
+// Outcome is the answer in a few words: "HTTP 200", "HTTP 404", or what
+// kind of error there was instead (see errorClass).
+func (c URLCheck) Outcome() string {
+	if c.Err != nil {
 		return errorClass(c.Err)
-	case !c.OK():
-		return "HTTP " + strconv.Itoa(c.Status)
 	}
-	return ""
+	return "HTTP " + strconv.Itoa(c.Status)
+}
+
+// Timed is Outcome with how long it took: "HTTP 200 in 0.24s", "timeout
+// after 10.00s".
+func (c URLCheck) Timed() string {
+	if c.Err != nil {
+		return c.Outcome() + " after " + seconds(c.Elapsed)
+	}
+	return c.Outcome() + " in " + seconds(c.Elapsed)
 }
 
 func withTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
@@ -197,21 +204,16 @@ func (d *doctor) network(insts []*instInfo) []probeResult {
 
 func (d *doctor) networkSection(results []probeResult) Section {
 	s := d.section("Network")
-	r := d.r
-	s.add(Info, "proxy for https: %s, for http: %s", d.proxyFor("https://dl.flatpark.org/"), d.proxyFor("http://dl.flatpark.org/"))
+	s.add("proxy for https: %s, for http: %s", d.proxyFor("https://dl.flatpark.org/"), d.proxyFor("http://dl.flatpark.org/"))
 	for _, p := range results {
 		label := ""
 		if p.label != "" {
 			label = "  " + p.label
 		}
-		switch {
-		case p.skipped != "":
-			s.add(Info, "%s  not checked: %s%s", RedactURL(p.url), p.skipped, label)
-		case p.check.OK():
-			s.add(OK, "%s  HTTP %d in %s%s", RedactURL(p.url), p.check.Status, seconds(p.check.Elapsed), label)
-		default:
-			s.add(Fail, "%s  %s after %s%s", RedactURL(p.url), p.check.Problem(), seconds(p.check.Elapsed), label).
-				hint(r, "check the network connection, the proxy settings and the firewall; flatpak cannot install or update from there")
+		if p.skipped != "" {
+			s.add("%s  not checked: %s%s", RedactURL(p.url), p.skipped, label)
+		} else {
+			s.add("%s  %s%s", RedactURL(p.url), p.check.Timed(), label)
 		}
 	}
 	return s.done()
