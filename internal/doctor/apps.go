@@ -30,27 +30,33 @@ func ParseInfo(out string) map[string]string {
 	return info
 }
 
-// ExtraDataCheck is the judgement on one extra-data file of an app.
+// ExtraDataCheck is what the server of one extra-data file of an app
+// answers.
 type ExtraDataCheck struct {
 	Source metadata.Source
 	URL    URLCheck
 	Cached bool // complete in the extra-data directory already
 }
 
-// Judge says what the check means: Fail if flatpak will not get the file
-// (no 2xx answer, or a size other than the pinned one, which means the
-// developer replaced the file), OK otherwise.
-func (c ExtraDataCheck) Judge() (Level, string) {
+// Text is what the check found, the server's size beside the pinned one:
+// "HTTP 200, 28.8 MB (pinned 28.8 MB)", "HTTP 404 (pinned 28.8 MB)",
+// "timeout after 10.00s (pinned 28.8 MB)". Sizes that differ but look the
+// same rounded are given in bytes.
+func (c ExtraDataCheck) Text() string {
+	pinned := units.Size(c.Source.Size)
 	switch {
+	case c.URL.Err != nil:
+		return c.URL.Timed() + " (pinned " + pinned + ")"
 	case !c.URL.OK():
-		return Fail, c.URL.Problem()
-	case c.URL.Length >= 0 && c.URL.Length != c.Source.Size:
-		return Fail, "the server has " + units.Size(c.URL.Length) + ", pinned " + units.Size(c.Source.Size) +
-			": the developer replaced the file and the pin is not updated yet"
+		return c.URL.Outcome() + " (pinned " + pinned + ")"
 	case c.URL.Length < 0:
-		return OK, "HTTP " + strconv.Itoa(c.URL.Status) + ", size not given, pinned " + units.Size(c.Source.Size)
+		return c.URL.Outcome() + ", size not given (pinned " + pinned + ")"
 	}
-	return OK, "HTTP " + strconv.Itoa(c.URL.Status) + ", " + units.Size(c.Source.Size) + " as pinned"
+	size := units.Size(c.URL.Length)
+	if size == pinned && c.URL.Length != c.Source.Size {
+		size, pinned = strconv.FormatInt(c.URL.Length, 10)+" bytes", strconv.FormatInt(c.Source.Size, 10)+" bytes"
+	}
+	return c.URL.Outcome() + ", " + size + " (pinned " + pinned + ")"
 }
 
 // commitCheck is the extra-data check of one commit of an app.
@@ -363,21 +369,19 @@ func (d *doctor) appSection(a *appInfo, insts []*instInfo, ps psInfo) Section {
 	s := d.section("App " + a.id)
 	r := d.r
 	if !a.checked {
-		s.add(Warn, "%s: not checked, flatpak is not usable", a.id).hint(r, "see the flatpak line above")
+		s.add("not checked: no flatpak command is run")
 		return s.done()
 	}
 	if len(a.insts) == 0 {
-		s.add(Info, "not installed in any installation")
+		s.add("not installed in any installation")
 		for _, u := range a.unreadable {
-			s.add(Warn, "cannot look for the app in %s", u).
-				hint(r, "check the network; the Network section above says whether the remote can be reached")
+			s.add("search in %s", u)
 		}
 		for _, f := range a.found {
-			d.commitItems(s, f.check, "flatpak install "+a.id)
+			d.commitItems(s, f.check)
 		}
 		if len(a.found) == 0 {
-			s.add(Warn, "%s is not found in any remote", a.id).
-				hint(r, "check the spelling of the app id (ids are case-sensitive) and the remotes (\"flatpak remotes\"); FlatPark's apps need the flatpark remote")
+			s.add("not found in any remote")
 		}
 	}
 
@@ -395,122 +399,109 @@ func (d *doctor) appSection(a *appInfo, insts []*instInfo, ps psInfo) Section {
 		return where, eol
 	}
 	for _, ai := range a.insts {
-		s.head("App "+a.id+", "+ai.in.inst.Title(), "%s", ai.in.inst.Title())
+		s.head("%s", ai.in.inst.Title())
 		if ai.err != nil {
-			s.add(Warn, "cannot read the app: %v", ai.err).hint(r, "flatpak repair %s", ai.in.inst.Option())
+			s.add("flatpak info: %v", ai.err)
 			continue
 		}
 		for _, key := range []string{"Ref", "Version", "Origin", "Commit", "Date"} {
-			if v := ai.info[key]; v != "" {
-				s.add(Info, "%s: %s", strings.ToLower(key), v)
+			v := ai.info[key]
+			if v == "" {
+				continue
 			}
-		}
-		if reason := ai.info["End-of-life"]; reason != "" {
-			s.add(Warn, "the app is end-of-life: %s", reason).
-				hint(r, "it gets no more updates; %s", eolHint(ai.info["End-of-life-rebase"]))
+			if reason := ai.info["End-of-life"]; key == "Ref" && reason != "" {
+				v += "  end-of-life: " + reason
+				if rebase := ai.info["End-of-life-rebase"]; rebase != "" {
+					v += "; end-of-life-rebase: " + rebase
+				}
+			}
+			s.add("%s: %s", strings.ToLower(key), v)
 		}
 		if rt := ai.info["Runtime"]; rt != "" {
 			where, eol := installed(rt)
-			switch {
-			case len(where) == 0:
-				s.add(Fail, "runtime %s is not installed: the app cannot start", rt).
-					hint(r, "flatpak install %s; or \"flatpak repair %s\"", rt, ai.in.inst.Option())
-			case eol != "":
-				s.add(Warn, "runtime %s (%s) is end-of-life: %s", rt, strings.Join(where, ", "), eol).
-					hint(r, "the app needs an update to a newer runtime; report it if none comes")
-			default:
-				s.add(OK, "runtime %s is installed (%s)", rt, strings.Join(where, ", "))
+			text := "not installed in any installation"
+			if len(where) > 0 {
+				text = "installed in " + strings.Join(where, ", ")
 			}
+			if eol != "" {
+				text += "  end-of-life: " + eol
+			}
+			s.add("runtime: %s  %s", rt, text)
 		}
 
 		if ai.permErr != nil {
-			s.add(Warn, "cannot read the permissions: %v", ai.permErr).hint(r, "flatpak repair %s", ai.in.inst.Option())
+			s.add("permissions (flatpak info --show-permissions): %v", ai.permErr)
 		} else {
-			s.add(Info, "permissions (flatpak info --show-permissions):").block(r, ai.perms)
+			s.add("permissions (flatpak info --show-permissions):").block(r, ai.perms)
 		}
 
 		if ai.remoteErr != nil {
-			s.add(Warn, "cannot check the remote's current commit: %v; checking the installed one", ai.remoteErr).
-				hint(r, "check the network and \"flatpak remotes %s\"; an app its remote no longer has gets no updates", ai.in.inst.Option())
+			s.add("remote commit: %v", ai.remoteErr)
 		}
 		if ai.metaErr != nil {
-			s.add(Warn, "cannot read the installed commit's metadata: %v", ai.metaErr).hint(r, "flatpak repair %s", ai.in.inst.Option())
+			s.add("installed commit's metadata: %v", ai.metaErr)
 		}
 		for _, c := range ai.checks {
-			d.commitItems(s, c, fmt.Sprintf("flatpak update %s %s", ai.in.inst.Option(), a.id))
+			d.commitItems(s, c)
 		}
 	}
 
-	s.head("App "+a.id, "%s", "Data and state")
+	s.head("%s", "Data and state")
 	for _, in := range insts {
 		if !in.exists {
 			continue
 		}
 		dir := filepath.Join(in.inst.Path, "overrides")
 		if text, ok := ReadOverride(dir, a.id); ok {
-			s.add(Info, "override %s:", filepath.Join(dir, a.id)).block(r, strings.TrimRight(text, "\n"))
+			s.add("override %s:", filepath.Join(dir, a.id)).block(r, strings.TrimRight(text, "\n"))
 		}
 		if in.hasGlobal && len(a.insts) > 0 {
-			s.add(Info, "also subject to the global override of the %s (see above)", strings.ToLower(in.inst.Title()))
+			s.add("the global override of the %s applies too (see above)", strings.ToLower(in.inst.Title()))
 		}
 	}
 	switch {
 	case a.permsErr != nil:
-		s.add(Warn, "cannot read the permission store: %v", a.permsErr).
-			hint(r, "flatpak permission-show needs the session bus (https://flatpark.org/docs/users/permission-store/)")
+		s.add("permission store (flatpak permission-show): %v", a.permsErr)
 	case a.perms == "":
-		s.add(Info, "permission store (flatpak permission-show): none")
+		s.add("permission store (flatpak permission-show): none")
 	default:
-		s.add(Info, "permission store (flatpak permission-show):").block(r, a.perms)
+		s.add("permission store (flatpak permission-show):").block(r, a.perms)
 	}
 	switch {
 	case a.dataErr != nil:
-		s.add(Warn, "%s: %v", a.dataDir, a.dataErr).hint(r, "check the permissions of %s", a.dataDir)
+		s.add("%s: %v", a.dataDir, a.dataErr)
 	case !a.hasData:
-		s.add(Info, "%s: does not exist", a.dataDir)
+		s.add("%s: does not exist", a.dataDir)
 	case a.dataBig:
-		s.add(Info, "%s: large (more than %s counted)", a.dataDir, units.Size(a.dataSize))
+		s.add("%s: more than %s (counting stopped after %s)", a.dataDir, units.Size(a.dataSize), seconds(d.cfg.DuTimeout))
 	default:
-		s.add(Info, "%s: %s", a.dataDir, units.Size(a.dataSize))
+		s.add("%s: %s", a.dataDir, units.Size(a.dataSize))
 	}
 	switch {
 	case ps.err != nil:
-		s.add(Info, "running: unknown (%v)", ps.err)
+		s.add("running: %v", ps.err)
 	case len(ps.pids[a.id]) > 0:
-		s.add(Info, "running: pid %s", strings.Join(ps.pids[a.id], ", "))
+		s.add("running: pid %s", strings.Join(ps.pids[a.id], ", "))
 	default:
-		s.add(Info, "running: no")
+		s.add("running: no")
 	}
 	return s.done()
 }
 
-// commitItems are the extra-data checks of a commit; retry is the
-// command that downloads them again once the pin is fixed.
-func (d *doctor) commitItems(s *builder, c commitCheck, retry string) {
-	r := d.r
+// commitItems are the extra-data checks of a commit.
+func (d *doctor) commitItems(s *builder, c commitCheck) {
 	if len(c.extra) == 0 && len(c.skipped) == 0 {
-		s.add(Info, "no extra-data (%s)", c.label)
+		s.add("no extra-data (%s)", c.label)
 		return
 	}
 	for _, sk := range c.skipped {
-		s.add(Info, "extra-data %s: not checked: %s (%s)", sk.Key, sk.Reason, c.label)
+		s.add("extra-data %s: not checked: %s (%s)", sk.Key, sk.Reason, c.label)
 	}
 	for _, e := range c.extra {
-		level, what := e.Judge()
 		cached := ""
 		if e.Cached {
-			cached = " (cached)"
+			cached = "  cached"
 		}
-		it := s.add(level, "extra-data %s  %s  %s%s (%s)", e.Source.Name, e.Source.URI, what, cached, c.label)
-		if level == Fail {
-			it.hint(r, "the file is downloaded from the developer's server; if they replaced or removed it, FlatPark's pin is updated, usually within a day, and then \"%s\" works; report it if that lasts (https://flatpark.org/docs/users/troubleshooting/)", retry)
-		}
+		s.add("extra-data %s  %s  %s%s  (%s)", e.Source.Name, e.Source.URI, e.Text(), cached, c.label)
 	}
-}
-
-func eolHint(rebase string) string {
-	if rebase != "" {
-		return "it was renamed to " + rebase + "; install that and uninstall this one"
-	}
-	return "look for a replacement"
 }

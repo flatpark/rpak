@@ -1,11 +1,14 @@
 // Package doctor collects what is needed to look into a problem report:
 // rpak, flatpak and the system they run on, the installations, the
-// network, and optionally single apps, with what looks wrong marked. It
-// only reads: it takes no locks, writes no files and runs nothing but
+// network, and optionally single apps. It reports facts and measurements
+// only; what they mean is for whoever reads the report to judge, by the
+// rules in FlatPark's documentation, which change more often than rpak.
+// It only reads: it takes no locks, writes no files and runs nothing but
 // flatpak's query commands.
 //
-// Everything it depends on is in Config, so that each check can be tested
-// on its own. Problems in one check only affect that check.
+// Everything it depends on is in Config, so that each part can be tested
+// on its own. What cannot be collected is reported as such, and only
+// affects that part.
 package doctor
 
 import (
@@ -25,28 +28,13 @@ import (
 	"github.com/flatpark/rpak/internal/prefetch"
 )
 
-// Level is how an item is marked.
-type Level int
-
-const (
-	Info Level = iota // a fact, no judgement
-	OK                // ✓
-	Warn              // !: worth a look, may explain a problem
-	Fail              // ✗: will make something fail
-)
-
-// Item is a line of the report.
+// Item is a line of the report: a fact, as collected.
 type Item struct {
-	Level Level
-	Text  string
-	// Hint says what to do about a Warn or Fail, in the Problems summary.
-	Hint string
+	Text string
 	// Block is verbatim text (a file, flatpak's output) shown below Text.
 	Block string
-	// Head marks a heading within the section (an installation); Context
-	// of the items after it is its text.
-	Head    bool
-	Context string
+	// Head marks a heading within the section (an installation).
+	Head bool
 }
 
 // Section is a titled part of the report.
@@ -58,29 +46,6 @@ type Section struct {
 // Report is the outcome of Run, in a fixed order.
 type Report struct {
 	Sections []Section
-}
-
-// Problems are the Warn and Fail items, in report order.
-func (r Report) Problems() []Item {
-	var out []Item
-	for _, s := range r.Sections {
-		for _, it := range s.Items {
-			if it.Level == Warn || it.Level == Fail {
-				out = append(out, it)
-			}
-		}
-	}
-	return out
-}
-
-// Failed reports whether there is a Fail item.
-func (r Report) Failed() bool {
-	for _, p := range r.Problems() {
-		if p.Level == Fail {
-			return true
-		}
-	}
-	return false
 }
 
 // Config is what doctor looks at.
@@ -259,9 +224,9 @@ func Run(ctx context.Context, cfg Config) Report {
 
 	return Report{Sections: []Section{
 		d.basicsSection(basics, release),
-		d.envSection(insts),
+		d.envSection(),
 		d.systemSection(system, insts),
-		d.installationsSection(insts, apps),
+		d.installationsSection(insts),
 		d.extraDataSection(extra),
 		d.networkSection(network),
 	}}.withApps(d, apps, insts, ps)
@@ -274,40 +239,30 @@ func (r Report) withApps(d *doctor, apps []*appInfo, insts []*instInfo, ps psInf
 	return r
 }
 
-// builder collects the items of a section, giving each the context of the
-// heading before it.
+// builder collects the items of a section.
 type builder struct {
-	r       Redactor
-	title   string
-	items   []Item
-	context string
+	r     Redactor
+	title string
+	items []Item
 }
 
 func (d *doctor) section(title string) *builder {
-	return &builder{r: d.r, title: title, context: title}
+	return &builder{r: d.r, title: title}
 }
 
-// head starts a part of the section; context names it in the Problems
-// summary.
-func (b *builder) head(context, format string, a ...any) {
-	b.context = b.r.String(context)
+// head starts a part of the section (an installation).
+func (b *builder) head(format string, a ...any) {
 	b.items = append(b.items, Item{Head: true, Text: b.r.Sprintf(format, a...)})
 }
 
-// add appends an item with a redacted text; hint (for Warn and Fail) and
-// block are set with the returned pointer's methods.
-func (b *builder) add(level Level, format string, a ...any) *Item {
-	b.items = append(b.items, Item{Level: level, Text: b.r.Sprintf(format, a...), Context: b.context})
+// add appends an item with a redacted text; a block is set with the
+// returned pointer's method.
+func (b *builder) add(format string, a ...any) *Item {
+	b.items = append(b.items, Item{Text: b.r.Sprintf(format, a...)})
 	return &b.items[len(b.items)-1]
 }
 
 func (b *builder) done() Section { return Section{Title: b.title, Items: b.items} }
-
-// hint sets the hint; its arguments are redacted, its format is not.
-func (it *Item) hint(r Redactor, format string, a ...any) *Item {
-	it.Hint = r.Sprintf(format, a...)
-	return it
-}
 
 func (it *Item) block(r Redactor, text string) *Item {
 	it.Block = r.String(text)

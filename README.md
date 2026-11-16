@@ -77,27 +77,34 @@ rpak doctor [APP_ID]...
 
 Collects what is needed to look into a problem: rpak, flatpak, the
 distribution and kernel, the environment variables that matter, user
-namespaces, portals, graphics cards and GL drivers, every installation
-with its remotes, locks, free space and overrides, the extra-data directory, and whether the
-remotes can be reached. With app ids, also where each app is installed,
-its runtime, permissions and overrides, and whether its extra-data files
-can be downloaded: those of the installed commit and of the one the
-remote has now, or for an app that is not installed, of the remotes that
-have it. What looks wrong is marked `!` or `✗` and summed up at the end
-with what to do about it.
+namespaces, portals, graphics cards and GL extensions, every installation
+with its remotes, locks, free space, end-of-life refs and overrides, the
+extra-data directory, and how the remotes answer. With app ids, also where
+each app is installed, its runtime, permissions and overrides, and how the
+servers of its extra-data files answer, with the size they give beside the
+pinned one: for the installed commit and the one the remote has now, or
+for an app that is not installed, for the remotes that have it.
+
+doctor reports facts and measurements, and judges none of them: what they
+mean is for the maintainers to read. It exits with 0 once it has collected
+the report. It only reads: it changes no files, takes no locks and runs
+only flatpak's query commands, none at all if the flatpak it finds is rpak
+itself. It needs the network and takes a few seconds.
 
 When you report a problem, paste the whole output into the issue. Home
 directories and user names are replaced, passwords in proxy URLs hidden,
-and the files shared with an app are only counted. doctor only reads; it
-needs the network and takes a few seconds.
+and the files shared with an app are only counted.
 
 ```
 $ rpak doctor com.google.Chrome
 ...
 == App com.google.Chrome
 User installation
-✓ runtime org.freedesktop.Platform/x86_64/26.08 is installed (User installation)
-✓ extra-data chrome.deb  https://dl.google.com/...  HTTP 200, 147.5 MB as pinned (installed and remote commit)
+  ref: app/com.google.Chrome/x86_64/stable
+  ...
+  runtime: org.freedesktop.Platform/x86_64/26.08  installed in User installation
+  ...
+  extra-data chrome.deb  https://dl.google.com/...  HTTP 200, 147.5 MB (pinned 147.5 MB)  (installed and remote commit)
 ...
 ```
 

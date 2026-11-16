@@ -102,81 +102,31 @@ func (d *doctor) latestRelease() releaseInfo {
 	return releaseInfo{tag: body.TagName}
 }
 
-// parseVersion reads a release version, "v1.2.3", or what git describe
-// makes of a later commit, "v1.2.3-4-gabcdef[-dirty]" (ahead is then
-// true). Anything else, "dev" or a bare commit, is not a release.
-func parseVersion(v string) (nums []int, ahead bool, ok bool) {
-	v = strings.TrimPrefix(v, "v")
-	base, rest, _ := strings.Cut(v, "-")
-	if base == "" {
-		return nil, false, false
-	}
-	for _, part := range strings.Split(base, ".") {
-		n, err := strconv.Atoi(part)
-		if err != nil || n < 0 {
-			return nil, false, false
-		}
-		nums = append(nums, n)
-	}
-	return nums, rest != "" && rest != "dirty", true
-}
-
-// Behind reports whether version is older than the release latest; ok is
-// false if either is not a release version.
-func Behind(version, latest string) (behind, ok bool) {
-	cur, _, ok1 := parseVersion(version)
-	rel, _, ok2 := parseVersion(latest)
-	if !ok1 || !ok2 {
-		return false, false
-	}
-	for i := 0; i < max(len(cur), len(rel)); i++ {
-		var a, b int
-		if i < len(cur) {
-			a = cur[i]
-		}
-		if i < len(rel) {
-			b = rel[i]
-		}
-		if a != b {
-			return a < b, true
-		}
-	}
-	return false, true
-}
-
 func (d *doctor) basicsSection(b *basicsInfo, rel releaseInfo) Section {
 	s := d.section("rpak and flatpak")
-	r := d.r
-	s.add(Info, "rpak %s  %s", d.cfg.Version, d.cfg.Executable)
-	switch behind, ok := Behind(d.cfg.Version, rel.tag); {
-	case rel.err != nil:
-		s.add(Info, "latest release: unknown (%v)", rel.err)
-	case !ok:
-		s.add(Info, "latest release: %s (this is not a release build)", rel.tag)
-	case behind:
-		s.add(Warn, "rpak %s is older than the latest release %s", d.cfg.Version, rel.tag).
-			hint(r, "download the new release: https://github.com/flatpark/rpak/releases/latest")
-	default:
-		s.add(OK, "rpak is up to date (latest release %s)", rel.tag)
+	latest := "latest release " + rel.tag
+	if rel.err != nil {
+		latest = "latest release: " + rel.err.Error()
 	}
+	s.add("rpak %s  %s  (%s)", d.cfg.Version, d.cfg.Executable, latest)
 
-	flatpakVar, _ := d.cfg.LookupEnv("RPAK_FLATPAK")
+	what := "flatpak in PATH"
+	if v, _ := d.cfg.LookupEnv("RPAK_FLATPAK"); v != "" {
+		what = "RPAK_FLATPAK"
+	}
 	switch {
 	case !b.found:
-		s.add(Fail, "flatpak not found (%s)", d.cfg.Flatpak).
-			hint(r, "install flatpak from your distribution, or point RPAK_FLATPAK at it")
+		path, _ := d.cfg.LookupEnv("PATH")
+		s.add("flatpak: not found (%s: %s; PATH=%s)", what, d.cfg.Flatpak, path)
 	case b.self:
-		what := "flatpak in PATH"
-		if flatpakVar != "" {
-			what = "RPAK_FLATPAK"
-		}
-		s.add(Fail, "%s is rpak itself (%s): rpak would run itself forever", what, d.cfg.Flatpak).
-			hint(r, "point RPAK_FLATPAK at the real flatpak (RPAK_FLATPAK=/usr/bin/flatpak); use \"alias flatpak=rpak\" instead of a link named flatpak")
+		// Running it would run rpak again, forever: no flatpak command
+		// is run at all.
+		s.add("%s resolves to this rpak binary (%s); no flatpak command is run", what, d.cfg.Flatpak)
 	case b.versErr != nil:
-		s.add(Fail, "flatpak %s does not run: %v", d.cfg.Flatpak, b.versErr).
-			hint(r, "reinstall flatpak, or point RPAK_FLATPAK at a working one")
+		s.add("flatpak --version: %v  %s", b.versErr, d.cfg.Flatpak)
 	default:
-		s.add(OK, "%s  %s", b.version, d.cfg.Flatpak)
+		version, _ := strings.CutPrefix(b.version, "Flatpak ")
+		s.add("flatpak %s  %s", version, d.cfg.Flatpak)
 	}
 
 	distro := osRelease(d.path("/etc/os-release"))
@@ -186,17 +136,19 @@ func (d *doctor) basicsSection(b *basicsInfo, rel releaseInfo) Section {
 	if distro == "" {
 		distro = "unknown"
 	}
-	s.add(Info, "distribution: %s", distro)
+	s.add("distribution: %s", distro)
 	if d.cfg.Kernel != nil {
-		s.add(Info, "kernel: %s", d.cfg.Kernel())
+		s.add("kernel: %s", d.cfg.Kernel())
 	}
-	if b.arch != "" {
-		s.add(Info, "architecture: %s", b.arch)
+	switch {
+	case b.archErr != nil:
+		s.add("flatpak --default-arch: %v", b.archErr)
+	case b.arch != "":
+		s.add("architecture: %s", b.arch)
 	}
 
-	if sudoUser := d.getenv("SUDO_USER"); sudoUser != "" && d.cfg.Euid == 0 {
-		s.add(Warn, "running under sudo (as root for %s): the user installation and the extra-data directory looked at are root's", sudoUser).
-			hint(r, "run \"rpak doctor\" without sudo, unless the problem is with the system installation only")
+	if sudoUser := d.getenv("SUDO_USER"); sudoUser != "" {
+		s.add("sudo: SUDO_USER=%s, uid %d, euid %d", sudoUser, d.cfg.Uid, d.cfg.Euid)
 	}
 	return s.done()
 }
