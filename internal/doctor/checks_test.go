@@ -489,3 +489,211 @@ func TestPermissionStore(t *testing.T) {
 		t.Errorf("nothing: %q", got)
 	}
 }
+
+func TestGPUs(t *testing.T) {
+	// card adds /sys/class/drm/<card>; driver "" is no driver link.
+	type card struct {
+		name, vendor, device, driver string
+		boot                         bool
+	}
+	run := func(nvidia string, cards ...card) []Item {
+		root := t.TempDir()
+		drm := filepath.Join(root, "sys/class/drm")
+		os.MkdirAll(drm, 0o755)
+		for _, c := range cards {
+			dev := filepath.Join(drm, c.name, "device")
+			os.MkdirAll(dev, 0o755)
+			os.WriteFile(filepath.Join(dev, "vendor"), []byte("0x"+c.vendor+"\n"), 0o644)
+			os.WriteFile(filepath.Join(dev, "device"), []byte("0x"+c.device+"\n"), 0o644)
+			boot := "0\n"
+			if c.boot {
+				boot = "1\n"
+			}
+			os.WriteFile(filepath.Join(dev, "boot_vga"), []byte(boot), 0o644)
+			if c.driver != "" {
+				// As in sysfs: a link to the driver's directory, which
+				// need not exist here.
+				os.Symlink("../../../../bus/pci/drivers/"+c.driver, filepath.Join(dev, "driver"))
+			}
+		}
+		if nvidia != "" {
+			os.MkdirAll(filepath.Join(root, "proc/driver/nvidia"), 0o755)
+			os.WriteFile(filepath.Join(root, "proc/driver/nvidia/version"), []byte("NVRM version: NVIDIA UNIX x86_64 Kernel Module  "+nvidia+"  Release Build\n"), 0o644)
+		}
+		d := &doctor{cfg: Config{Root: root, LookupEnv: func(string) (string, bool) { return "", false }}}
+		return d.systemSection(d.systemInfo(), nil).Items
+	}
+	// lines are the GPU, hybrid and NVIDIA lines, marked as printed.
+	lines := func(items []Item) []string {
+		var out []string
+		for _, it := range items {
+			if strings.HasPrefix(it.Text, "GPU") || strings.HasPrefix(it.Text, "hybrid") || strings.HasPrefix(it.Text, "NVIDIA") {
+				out = append(out, map[Level]string{Info: " ", OK: "✓", Warn: "!", Fail: "✗"}[it.Level]+" "+it.Text)
+			}
+		}
+		return out
+	}
+	intel := card{"card0", "8086", "a7a0", "i915", true}
+	for _, c := range []struct {
+		name   string
+		nvidia string
+		cards  []card
+		want   []string
+	}{
+		{"Intel", "", []card{intel}, []string{"  GPU card0: Intel 8086:a7a0, driver i915 (boot)"}},
+		{"Intel and NVIDIA", "580.95.05", []card{{"card1", "10de", "2860", "nvidia", false}, intel}, []string{
+			"  GPU card0: Intel 8086:a7a0, driver i915 (boot)",
+			"  GPU card1: NVIDIA 10de:2860, driver nvidia",
+			"  hybrid graphics: Intel + NVIDIA",
+			// The extension check as before.
+			"✗ NVIDIA driver 580.95.05, but org.freedesktop.Platform.GL.nvidia-580-95-05 is not installed: apps fall back to software rendering or do not start",
+		}},
+		{"NVIDIA without its version", "", []card{intel, {"card1", "10de", "2860", "nvidia", false}}, []string{
+			"  GPU card0: Intel 8086:a7a0, driver i915 (boot)",
+			"  GPU card1: NVIDIA 10de:2860, driver nvidia",
+			"  hybrid graphics: Intel + NVIDIA",
+			"! NVIDIA card1 uses the nvidia driver, but /proc/driver/nvidia/version does not exist: the GL.nvidia extension apps need is unknown",
+		}},
+		{"NVIDIA with nouveau", "", []card{{"card0", "10de", "1c82", "nouveau", true}}, []string{
+			"  GPU card0: NVIDIA 10de:1c82, driver nouveau (boot)",
+			"  NVIDIA card0 uses nouveau, which Mesa drives through GL.default: no GL.nvidia extension is needed",
+		}},
+		{"AMD", "", []card{{"card1", "1002", "73df", "amdgpu", true}}, []string{"  GPU card1: AMD 1002:73df, driver amdgpu (boot)"}},
+		{"other vendor", "", []card{{"card0", "1af4", "1050", "virtio_gpu", false}}, []string{"  GPU card0: 1af4:1050, driver virtio_gpu"}},
+		// Connectors are left out, and so is renderD128; card10 after card2.
+		{"connectors", "", []card{{"card10", "1002", "73df", "amdgpu", false}, {"card10-DP-1", "", "", "", false}, {"card0-HDMI-A-1", "", "", "", false}, {"renderD128", "", "", "", false}, {"card2", "8086", "a7a0", "", false}}, []string{
+			"  GPU card2: Intel 8086:a7a0, no driver",
+			"  GPU card10: AMD 1002:73df, driver amdgpu",
+		}},
+		// One card with a driver is no hybrid.
+		{"no driver", "", []card{intel, {"card1", "10de", "2860", "", false}}, []string{
+			"  GPU card0: Intel 8086:a7a0, driver i915 (boot)",
+			"  GPU card1: NVIDIA 10de:2860, no driver",
+		}},
+		{"no cards", "", nil, []string{"  GPU: none found in /sys/class/drm"}},
+	} {
+		items := run(c.nvidia, c.cards...)
+		if got := lines(items); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s:\n%s\nwant:\n%s", c.name, strings.Join(got, "\n"), strings.Join(c.want, "\n"))
+		}
+		for _, it := range items {
+			if it.Level == Warn && it.Hint == "" {
+				t.Errorf("%s: %q has no hint", c.name, it.Text)
+			}
+		}
+	}
+	// No /sys at all.
+	d := &doctor{cfg: Config{Root: t.TempDir(), LookupEnv: func(string) (string, bool) { return "", false }}}
+	if got := lines(d.systemSection(d.systemInfo(), nil).Items); !reflect.DeepEqual(got, []string{"  GPU: none found in /sys/class/drm"}) {
+		t.Errorf("no /sys: %q", got)
+	}
+}
+
+func TestEOL(t *testing.T) {
+	if got := ShortRef("org.freedesktop.Platform/x86_64/24.08"); got != "org.freedesktop.Platform//24.08" {
+		t.Errorf("ShortRef = %q", got)
+	}
+	if got := ShortRef("app/org.example.App/x86_64/stable"); got != "org.example.App//stable" {
+		t.Errorf("ShortRef(app/...) = %q", got)
+	}
+	eol := ",eol=org.freedesktop.Platform 24.08 is no longer receiving fixes"
+	unrelated := []listEntry{
+		{"org.freedesktop.Platform/x86_64/24.08", "system,runtime" + eol},
+		{"org.freedesktop.Platform.GL.default/x86_64/24.08", "system,runtime" + eol},
+		{"org.freedesktop.Platform.GL.default/x86_64/24.08extra", "system,runtime" + eol},
+		{"org.freedesktop.Platform.VAAPI.Intel/x86_64/24.08", "system,runtime" + eol},
+		{"org.kde.Platform/x86_64/5.15-24.08", "system,runtime,eol=We strongly recommend moving to the latest stable version"},
+		{"org.gnome.Platform/x86_64/49", "system,runtime"},
+	}
+	// run reports on a system installation with the runtimes and an app
+	// org.example.App on runtime, if given; apps are the ids checked.
+	run := func(runtimes []listEntry, runtime string, apps ...string) Report {
+		in := &instInfo{exists: true, writable: true, free: lowSpace, runtimes: refList{refs: runtimes}, remotes: []Remote{{Name: "flathub"}, {Name: "flatpark"}}}
+		in.inst.ID = "default"
+		var checked []*appInfo
+		for _, id := range apps {
+			a := &appInfo{id: id, checked: true}
+			if runtime != "" {
+				a.insts = []*appInst{{in: in, info: map[string]string{"Ref": "app/" + id + "/x86_64/stable", "Runtime": runtime}}}
+				in.apps.refs = append(in.apps.refs, listEntry{ref: id + "/x86_64/stable", options: "system,current"})
+			}
+			checked = append(checked, a)
+		}
+		d := &doctor{cfg: Config{Apps: apps, LookupEnv: func(string) (string, bool) { return "", false }}}
+		sections := []Section{d.installationsSection([]*instInfo{in}, checked)}
+		for _, a := range checked {
+			sections = append(sections, d.appSection(a, []*instInfo{in}, psInfo{}))
+		}
+		return Report{Sections: sections}
+	}
+	eolItems := func(r Report) []string {
+		var out []string
+		for _, s := range r.Sections {
+			for _, it := range s.Items {
+				if strings.Contains(it.Text, "end-of-life") {
+					out = append(out, map[Level]string{Info: " ", Warn: "!"}[it.Level]+" "+it.Text)
+				}
+			}
+		}
+		return out
+	}
+	const five = "org.freedesktop.Platform//24.08, org.freedesktop.Platform.GL.default//24.08, org.freedesktop.Platform.GL.default//24.08extra, org.freedesktop.Platform.VAAPI.Intel//24.08, org.kde.Platform//5.15-24.08"
+
+	// The app's runtime is end-of-life: a problem in its section, with the
+	// reason; the others one line, not a problem.
+	r := run(unrelated, "org.freedesktop.Platform/x86_64/24.08", "org.example.App")
+	want := []string{
+		"  4 end-of-life runtimes not used by the apps checked: org.freedesktop.Platform.GL.default//24.08, org.freedesktop.Platform.GL.default//24.08extra, org.freedesktop.Platform.VAAPI.Intel//24.08, org.kde.Platform//5.15-24.08",
+		"! runtime org.freedesktop.Platform/x86_64/24.08 (System installation (default)) is end-of-life: org.freedesktop.Platform 24.08 is no longer receiving fixes",
+	}
+	if got := eolItems(r); !reflect.DeepEqual(got, want) {
+		t.Errorf("app's runtime end-of-life:\n%s", strings.Join(got, "\n"))
+	}
+	if ps := r.Problems(); len(ps) != 1 || !strings.HasPrefix(ps[0].Text, "runtime org.freedesktop.Platform/x86_64/24.08") {
+		t.Errorf("problems: %+v", ps)
+	}
+
+	// Only end-of-life refs the app does not use: no problem.
+	r = run(unrelated, "org.gnome.Platform/x86_64/49", "org.example.App")
+	if got := eolItems(r); !reflect.DeepEqual(got, []string{"  5 end-of-life runtimes not used by the apps checked: " + five}) {
+		t.Errorf("unrelated end-of-life:\n%s", strings.Join(got, "\n"))
+	}
+	if ps := r.Problems(); len(ps) != 0 {
+		t.Errorf("problems: %+v", ps)
+	}
+	// An app that is not installed uses nothing.
+	if got := eolItems(run(unrelated, "", "org.example.Gone")); !reflect.DeepEqual(got, []string{"  5 end-of-life runtimes not used by the apps checked: " + five}) {
+		t.Errorf("app not installed:\n%s", strings.Join(got, "\n"))
+	}
+
+	// No app: one problem per installation, without the reasons.
+	r = run(unrelated, "")
+	if got := eolItems(r); !reflect.DeepEqual(got, []string{"! 5 end-of-life runtimes: " + five}) {
+		t.Errorf("no app:\n%s", strings.Join(got, "\n"))
+	}
+	ps := r.Problems()
+	if len(ps) != 1 || ps[0].Context != "System installation (default)" ||
+		ps[0].Hint != `flatpak update --system; if the apps still need it, they have to move on first; "flatpak uninstall --system --unused" removes unused runtimes` {
+		t.Errorf("problems: %+v", ps)
+	}
+
+	// More than eolListed: the first ones and a count; one is one.
+	var many []listEntry
+	for i := range 11 {
+		many = append(many, listEntry{fmt.Sprintf("org.example.R%d/x86_64/1", i), "runtime,eol=old"})
+	}
+	if got := eolItems(run(many, "")); !reflect.DeepEqual(got, []string{"! 11 end-of-life runtimes: org.example.R0//1, org.example.R1//1, org.example.R2//1, org.example.R3//1, org.example.R4//1, org.example.R5//1, org.example.R6//1, org.example.R7//1, and 3 more"}) {
+		t.Errorf("many:\n%s", strings.Join(got, "\n"))
+	}
+	if got := eolItems(run(many[:1], "")); !reflect.DeepEqual(got, []string{"! 1 end-of-life runtime: org.example.R0//1"}) {
+		t.Errorf("one:\n%s", strings.Join(got, "\n"))
+	}
+	// Apps, besides runtimes; the same id//branch of two arches once.
+	if got := EOLSummary([]string{"a//1"}, []string{"b//stable", "c//stable"}, true); got != "1 end-of-life runtime and 2 apps other than the apps checked and their runtimes: a//1, b//stable, c//stable" {
+		t.Errorf("EOLSummary with apps: %q", got)
+	}
+	twoArches := []listEntry{{"org.example.R/x86_64/1", "runtime,eol=old"}, {"org.example.R/i386/1", "runtime,eol=old"}}
+	if got := eolItems(run(twoArches, "")); !reflect.DeepEqual(got, []string{"! 1 end-of-life runtime: org.example.R//1"}) {
+		t.Errorf("two arches:\n%s", strings.Join(got, "\n"))
+	}
+}

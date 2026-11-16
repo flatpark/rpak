@@ -369,9 +369,10 @@ func (in *instInfo) used() bool {
 // often need more.
 const lowSpace = 2 << 30
 
-func (d *doctor) installationsSection(insts []*instInfo) Section {
+func (d *doctor) installationsSection(insts []*instInfo, apps []*appInfo) Section {
 	s := d.section("Installations")
 	r := d.r
+	used := usedRefs(apps)
 	for _, in := range insts {
 		s.head(in.inst.Title(), "%s: %s", in.inst.Title(), in.inst.Path)
 		if !in.exists {
@@ -418,7 +419,7 @@ func (d *doctor) installationsSection(insts []*instInfo) Section {
 			// Said once, with the flatpak line.
 			s.add(Info, "remotes and refs not checked: %v", in.remotesErr)
 		} else {
-			d.refsItems(s, in)
+			d.refsItems(s, in, used)
 		}
 		d.overrideItems(s, in)
 	}
@@ -447,8 +448,9 @@ func (d *doctor) installationsSection(insts []*instInfo) Section {
 	return s.done()
 }
 
-// refsItems are the remotes and what is installed.
-func (d *doctor) refsItems(s *builder, in *instInfo) {
+// refsItems are the remotes and what is installed; used are the refs of
+// the apps checked, see usedRefs.
+func (d *doctor) refsItems(s *builder, in *instInfo, used map[string]bool) {
 	r := d.r
 	if in.remotesErr != nil {
 		s.add(Warn, "cannot list the remotes: %v", in.remotesErr).hint(r, "flatpak repair %s", in.inst.Option())
@@ -473,14 +475,103 @@ func (d *doctor) refsItems(s *builder, in *instInfo) {
 		return fmt.Sprintf("%d %s", len(l.refs), what)
 	}
 	s.add(Info, "%s, %s", counts(in.apps, "apps"), counts(in.runtimes, "runtimes"))
-	for _, l := range []refList{in.runtimes, in.apps} {
+
+	// The end-of-life refs of the apps checked are in their sections, with
+	// the reason; the others are one line, a problem only if no app is
+	// checked: there are often many, and they rarely explain a problem.
+	var runtimes, apps []string
+	seen := map[string]bool{}
+	for i, l := range []refList{in.runtimes, in.apps} {
 		for _, e := range l.refs {
-			if reason, ok := e.eol(); ok {
-				s.add(Warn, "%s is end-of-life: %s", e.ref, reason).
-					hint(r, "flatpak update %s; if the apps still need it, they have to move on first; \"flatpak uninstall %s --unused\" removes unused runtimes", in.inst.Option(), in.inst.Option())
+			short := ShortRef(e.ref)
+			if _, ok := e.eol(); !ok || used[e.ref] || seen[short] {
+				continue
+			}
+			seen[short] = true
+			if i == 0 {
+				runtimes = append(runtimes, short)
+			} else {
+				apps = append(apps, short)
 			}
 		}
 	}
+	switch {
+	case len(runtimes)+len(apps) == 0:
+	case len(d.cfg.Apps) > 0:
+		s.add(Info, "%s", EOLSummary(runtimes, apps, true))
+	default:
+		s.add(Warn, "%s", EOLSummary(runtimes, apps, false)).
+			hint(r, "flatpak update %s; if the apps still need it, they have to move on first; \"flatpak uninstall %s --unused\" removes unused runtimes", in.inst.Option(), in.inst.Option())
+	}
+}
+
+// ShortRef is a ref as id//branch: org.freedesktop.Platform//24.08 for
+// org.freedesktop.Platform/x86_64/24.08 (or runtime/...).
+func ShortRef(ref string) string {
+	parts := strings.Split(ref, "/")
+	if len(parts) == 4 {
+		parts = parts[1:]
+	}
+	if len(parts) != 3 {
+		return ref
+	}
+	return parts[0] + "//" + parts[2]
+}
+
+// eolListed is how many refs EOLSummary names.
+const eolListed = 8
+
+// EOLSummary is the line of an installation's end-of-life refs (short,
+// runtimes first): "5 end-of-life runtimes: a//1, b//2, ...", the first
+// eolListed of them named. checked says that apps are checked and these
+// are the others.
+func EOLSummary(runtimes, apps []string, checked bool) string {
+	plural := func(n int, what string) string {
+		if n == 1 {
+			return "1 " + what
+		}
+		return strconv.Itoa(n) + " " + what + "s"
+	}
+	var what string
+	switch {
+	case len(apps) == 0:
+		what = plural(len(runtimes), "end-of-life runtime")
+	case len(runtimes) == 0:
+		what = plural(len(apps), "end-of-life app")
+	default:
+		what = plural(len(runtimes), "end-of-life runtime") + " and " + plural(len(apps), "app")
+	}
+	if checked {
+		if len(apps) == 0 {
+			what += " not used by the apps checked"
+		} else {
+			what += " other than the apps checked and their runtimes"
+		}
+	}
+	refs := append(append([]string{}, runtimes...), apps...)
+	list := strings.Join(refs[:min(len(refs), eolListed)], ", ")
+	if len(refs) > eolListed {
+		list += fmt.Sprintf(", and %d more", len(refs)-eolListed)
+	}
+	return what + ": " + list
+}
+
+// usedRefs are the refs, as flatpak list names them, of the apps checked
+// and of their runtimes, in any installation: their end-of-life is said
+// in the app sections.
+func usedRefs(apps []*appInfo) map[string]bool {
+	used := map[string]bool{}
+	for _, a := range apps {
+		for _, ai := range a.insts {
+			if ref := ai.info["Ref"]; ref != "" {
+				used[strings.TrimPrefix(ref, "app/")] = true
+			}
+			if rt := ai.info["Runtime"]; rt != "" {
+				used[strings.TrimPrefix(rt, "runtime/")] = true
+			}
+		}
+	}
+	return used
 }
 
 // overrideItems are the overrides, which flatpak is not needed to read.

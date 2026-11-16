@@ -335,6 +335,10 @@ for argv in "" "${APPS[0]}"; do
 	! grep -qF "$HOME/" /tmp/doctor.log || fail "rpak doctor $argv: $HOME/ in the output: $(grep -F "$HOME/" /tmp/doctor.log | head -3)"
 done
 pass "rpak doctor: all sections, $HOME shown as ~ (${SECONDS}s for both runs)"
+# The cards of the host's /sys, or none in the container.
+grep -Eq "^  GPU (card[0-9]+: .*, (driver [^ ]+|no driver)( \(boot\))?|: none found in /sys/class/drm)$" /tmp/doctor.log ||
+	fail "rpak doctor: no GPU line"
+pass "rpak doctor lists the graphics cards: $(grep -E '^  GPU' /tmp/doctor.log | sed 's/^  //' | paste -sd ';')"
 grep -qx "== App ${APPS[0]}" /tmp/doctor.log || fail "no section for ${APPS[0]}"
 grep -E '^(✓|✗) extra-data .* \(installed and remote commit\)$' /tmp/doctor.log || fail "no extra-data check of the remote's commit of ${APPS[0]}"
 grep -qF "~/.var/app/${APPS[0]}: " /tmp/doctor.log || fail "no data directory line for ${APPS[0]}"

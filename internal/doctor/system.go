@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +24,8 @@ type systemInfo struct {
 	// portalFiles are the portal definitions and configuration files.
 	portalFiles []portalFile
 	nvidia      string // driver version, "" without the NVIDIA driver
+	nvidiaErr   error  // reading /proc/driver/nvidia/version
+	gpus        []GPU
 }
 
 type portalFile struct {
@@ -47,8 +51,65 @@ func (d *doctor) systemInfo() systemInfo {
 	s.portalFiles = d.portalFiles()
 	if v, err := os.ReadFile(d.path("/proc/driver/nvidia/version")); err == nil {
 		s.nvidia = NvidiaVersion(string(v))
+	} else {
+		s.nvidiaErr = err
 	}
+	s.gpus = GPUs(d.path("/sys/class/drm"))
 	return s
+}
+
+// GPU is a graphics card, as /sys/class/drm/cardN shows it.
+type GPU struct {
+	Card   string // "card0"
+	Vendor string // PCI ids, "8086", without 0x
+	Device string
+	Driver string // the kernel driver, "" if none is bound
+	Boot   bool   // the card the firmware set up (boot_vga)
+}
+
+// VendorName is the name of the vendors that matter for flatpak's GL
+// extensions; others are shown by their id.
+func (g GPU) VendorName() string {
+	switch g.Vendor {
+	case "8086":
+		return "Intel"
+	case "10de":
+		return "NVIDIA"
+	case "1002":
+		return "AMD"
+	}
+	return g.Vendor
+}
+
+// GPUs lists the cards in drm (/sys/class/drm) by number: the cardN
+// entries, not their connectors (card0-HDMI-A-1). It reads only sysfs,
+// neither pci.ids nor lspci.
+func GPUs(drm string) []GPU {
+	entries, err := os.ReadDir(drm)
+	if err != nil {
+		return nil
+	}
+	var out []GPU
+	num := map[string]int{}
+	for _, e := range entries {
+		n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "card"))
+		if !strings.HasPrefix(e.Name(), "card") || err != nil || n < 0 {
+			continue
+		}
+		dev := filepath.Join(drm, e.Name(), "device")
+		read := func(name string) string {
+			b, _ := os.ReadFile(filepath.Join(dev, name))
+			return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(string(b)), "0x"))
+		}
+		g := GPU{Card: e.Name(), Vendor: read("vendor"), Device: read("device"), Boot: read("boot_vga") == "1"}
+		if link, err := os.Readlink(filepath.Join(dev, "driver")); err == nil {
+			g.Driver = filepath.Base(link)
+		}
+		num[g.Card] = n
+		out = append(out, g)
+	}
+	sort.Slice(out, func(i, j int) bool { return num[out[i].Card] < num[out[j].Card] })
+	return out
 }
 
 // UsernsProblem says why unprivileged user namespaces, which bubblewrap
@@ -171,6 +232,58 @@ func NvidiaExtension(version string) string {
 	return "org.freedesktop.Platform.GL.nvidia-" + strings.ReplaceAll(version, ".", "-")
 }
 
+// gpuItems are the graphics cards, which say which GL extension apps need,
+// and what they mean for the NVIDIA check.
+func (d *doctor) gpuItems(s *builder, sys systemInfo) {
+	r := d.r
+	if len(sys.gpus) == 0 {
+		s.add(Info, "GPU: none found in /sys/class/drm")
+		return
+	}
+	var bound []string
+	for _, g := range sys.gpus {
+		driver := "no driver"
+		if g.Driver != "" {
+			driver = "driver " + g.Driver
+			bound = append(bound, g.VendorName())
+		}
+		boot := ""
+		if g.Boot {
+			boot = " (boot)"
+		}
+		name := g.VendorName() + " "
+		if name == g.Vendor+" " {
+			name = ""
+		}
+		s.add(Info, "GPU %s: %s%s:%s, %s%s", g.Card, name, g.Vendor, g.Device, driver, boot)
+	}
+	if len(bound) > 1 {
+		s.add(Info, "hybrid graphics: %s", strings.Join(bound, " + "))
+	}
+	for _, g := range sys.gpus {
+		if g.Vendor != "10de" {
+			continue
+		}
+		switch {
+		case g.Driver == "nouveau":
+			s.add(Info, "NVIDIA %s uses nouveau, which Mesa drives through GL.default: no GL.nvidia extension is needed", g.Card)
+		case g.Driver == "nvidia" && sys.nvidia == "":
+			why := "has no driver version"
+			var pe *fs.PathError
+			switch {
+			case errors.Is(sys.nvidiaErr, fs.ErrNotExist):
+				why = "does not exist"
+			case errors.As(sys.nvidiaErr, &pe):
+				why = "cannot be read: " + pe.Err.Error()
+			case sys.nvidiaErr != nil:
+				why = "cannot be read: " + sys.nvidiaErr.Error()
+			}
+			s.add(Warn, "NVIDIA %s uses the nvidia driver, but /proc/driver/nvidia/version %s: the GL.nvidia extension apps need is unknown", g.Card, why).
+				hint(r, "check that the nvidia kernel module is loaded and matches the driver (cat /proc/driver/nvidia/version, nvidia-smi)")
+		}
+	}
+}
+
 // glExtension is an installed GL extension.
 type glExtension struct {
 	id, ref, where string
@@ -228,6 +341,8 @@ func (d *doctor) systemSection(sys systemInfo, insts []*instInfo) Section {
 			it.block(r, f.content)
 		}
 	}
+
+	d.gpuItems(s, sys)
 
 	var exts []glExtension
 	for _, in := range insts {
