@@ -100,7 +100,7 @@ type Config struct {
 	// other than the current one (SUDO_USER) to hide, path → name.
 	Users      []string
 	OtherHomes map[string]string
-	// Root is prepended to /proc, /etc and /usr paths; "" is the real root.
+	// Root is prepended to /proc, /sys, /etc and /usr paths; "" is the real root.
 	Root   string
 	Uid    int
 	Euid   int
@@ -261,7 +261,7 @@ func Run(ctx context.Context, cfg Config) Report {
 		d.basicsSection(basics, release),
 		d.envSection(insts),
 		d.systemSection(system, insts),
-		d.installationsSection(insts),
+		d.installationsSection(insts, apps),
 		d.extraDataSection(extra),
 		d.networkSection(network),
 	}}.withApps(d, apps, insts, ps)

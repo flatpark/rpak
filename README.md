@@ -77,8 +77,8 @@ rpak doctor [APP_ID]...
 
 Collects what is needed to look into a problem: rpak, flatpak, the
 distribution and kernel, the environment variables that matter, user
-namespaces, portals and GL drivers, every installation with its remotes,
-locks, free space and overrides, the extra-data directory, and whether the
+namespaces, portals, graphics cards and GL drivers, every installation
+with its remotes, locks, free space and overrides, the extra-data directory, and whether the
 remotes can be reached. With app ids, also where each app is installed,
 its runtime, permissions and overrides, and whether its extra-data files
 can be downloaded: those of the installed commit and of the one the

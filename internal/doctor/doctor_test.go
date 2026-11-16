@@ -162,9 +162,9 @@ func TestRun(t *testing.T) {
 		{"Environment", "XDG_DATA_DIRS lacks ~/.local/share/flatpak/exports/share", Warn},
 		{"Environment", "https_proxy=http://***@proxy.example:3128", Info},
 		{"System", "xdg-desktop-portal is not running", Warn},
+		{"System", "GPU: none found in /sys/class/drm", Info},
 		{"Installations", "remote local  file://~/repo  (priority 0, no-gpg-verify)", Info},
 		{"Installations", "no remote named flathub in any installation", Warn},
-		{"Installations", "org.freedesktop.Platform/x86_64/25.08 is end-of-life: too old, really", Warn},
 		{"Installations", "global override (~/.local/share/flatpak/overrides/global)", Warn},
 		{"Installations", "apps with an override: org.example.Extra", Info},
 		{"Installations", "2 apps, 2 runtimes", Info},
@@ -198,6 +198,15 @@ func TestRun(t *testing.T) {
 		}
 		if (it.Level == Warn || it.Level == Fail) && it.Hint == "" {
 			t.Errorf("%s: %q has no hint", c.title, it.Text)
+		}
+	}
+	// The end-of-life runtime is the app's: in its section, not again in
+	// the installation's.
+	for _, s := range r.Sections {
+		for _, it := range s.Items {
+			if s.Title == "Installations" && strings.Contains(it.Text, "end-of-life") {
+				t.Errorf("Installations: %q", it.Text)
+			}
 		}
 	}
 	// The remote's file:// URL is not checked, its summary is checked once.
