@@ -84,6 +84,35 @@ func TestForceInstallArgv(t *testing.T) {
 	}
 }
 
+// TestForceInstallFindsRemote: without REMOTE the remote is the one of the
+// user installation that has the app, as flatpak install finds it.
+func TestForceInstallFindsRemote(t *testing.T) {
+	e := newEnv(t)
+	forceApp(e, "org.example.App", "org.freedesktop.Platform/x86_64/24.08")
+	os.WriteFile(filepath.Join(e.base, "repo", "config"),
+		[]byte("[core]\nrepo_version=1\n\n[remote \"other\"]\nurl=file:///nonexistent\n\n[remote \"upstream\"]\nurl=file:///nonexistent\n"), 0o644)
+	e.write("remotes-user", "other\nupstream\n")
+	out := e.run("install", "-y", "--force-runtime=25.08", "org.example.App")
+	if out.code != 0 {
+		t.Fatalf("exit %d\n%s", out.code, out.stderr)
+	}
+	e.assertArgv([]string{"install", "-y", "--user", "--no-deps", "upstream", "app/org.example.App/x86_64/stable"})
+	if !strings.Contains(out.stderr, "rpak: org.example.App: found in the remote upstream\n") {
+		t.Errorf("stderr:\n%s", out.stderr)
+	}
+
+	// In two remotes: rpak does not choose.
+	e.write(filepath.Join("info", "user", "other", "org.example.App"), e.read(filepath.Join("info", "user", "upstream", "org.example.App")))
+	os.Remove(filepath.Join(e.fake, "argv"))
+	out = e.run("install", "-y", "--force-runtime=25.08", "org.example.App")
+	if out.code != 2 || !strings.Contains(out.stderr, "org.example.App is in more than one remote of the user installation (other, upstream)") {
+		t.Errorf("exit %d\n%s", out.code, out.stderr)
+	}
+	if e.read("argv") != "" {
+		t.Errorf("flatpak was run")
+	}
+}
+
 func TestForceInstallUpstreamAlreadyThere(t *testing.T) {
 	e := newEnv(t)
 	forceApp(e, "org.example.App", "org.freedesktop.Platform/x86_64/25.08")
@@ -102,7 +131,7 @@ func TestForceUsageErrors(t *testing.T) {
 	e := newEnv(t)
 	forceApp(e, "org.example.App", "org.freedesktop.Platform/x86_64/24.08")
 	for _, argv := range [][]string{
-		{"install", "--force-runtime", "org.example.App"},                         // no REMOTE
+		{"install", "--force-runtime", "org.example.Missing"},                     // in no remote
 		{"install", "--system", "--force-runtime", "upstream", "org.example.App"}, // not the user installation
 		{"install", "--force-runtime=a/b", "upstream", "org.example.App"},         // bad target
 		{"install", "--force-runtime", "--bundle", "x.flatpak"},
