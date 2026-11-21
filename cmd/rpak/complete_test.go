@@ -50,7 +50,7 @@ func TestCompleteCommandNames(t *testing.T) {
 	e := newEnv(t)
 	e.write("complete-out", "install \nupdate \nlist \n")
 	out, code := e.complete(nil, "rpak ", "5", "")
-	if code != 0 || out != "install \nupdate \nlist \nclean \ncompletion \ndoctor \n" {
+	if code != 0 || out != "install \nupdate \nlist \nclean \ncompletion \ndoctor \npatch \n" {
 		t.Errorf("exit %d, output %q", code, out)
 	}
 	if got, want := e.completeArgv(), []string{"flatpak ", "8", ""}; !slices.Equal(got, want) {
@@ -79,7 +79,7 @@ func TestCompleteCommandNamesWithoutFlatpak(t *testing.T) {
 	e := newEnv(t)
 	for _, flatpak := range []string{filepath.Join(e.fake, "missing"), "false"} {
 		env := []string{"RPAK_FLATPAK=" + flatpak}
-		if out, code := e.complete(env, "rpak ", "5", ""); code != 0 || out != "install \nupdate \nclean \ncompletion \ndoctor \n" {
+		if out, code := e.complete(env, "rpak ", "5", ""); code != 0 || out != "install \nupdate \nclean \ncompletion \ndoctor \npatch \n" {
 			t.Errorf("%s: exit %d, output %q", flatpak, code, out)
 		}
 		if out, _ := e.complete(env, "rpak up", "7", "up"); out != "update \n" {
@@ -321,5 +321,46 @@ func TestCompleteChangesNothing(t *testing.T) {
 		if !strings.HasPrefix(call, "complete ") {
 			t.Errorf("flatpak called with %q", call)
 		}
+	}
+}
+
+func TestCompleteForceRuntime(t *testing.T) {
+	e := newEnv(t)
+	e.write("complete-out", "--user \n--no-deps \n")
+	// install/update: flatpak's options and rpak's own.
+	if out, _ := e.complete(nil, "rpak install --", "15", "--"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n" {
+		t.Errorf("install --: %q", out)
+	}
+	if out, _ := e.complete(nil, "rpak update --fo", "16", "--fo"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n" {
+		t.Errorf("update --fo: %q", out)
+	}
+	// Not an option: flatpak alone.
+	if out, _ := e.complete(nil, "rpak install fl", "15", "fl"); out != "--user \n--no-deps \n" {
+		t.Errorf("install fl: %q", out)
+	}
+	// bash splits at "=": the value only.
+	if out, _ := e.complete(nil, "rpak install --force-runtime=l", "30", "l"); out != "latest \n" {
+		t.Errorf("--force-runtime=l: %q", out)
+	}
+	// The command's own words.
+	if out, _ := e.complete(nil, "rpak patch --re", "15", "--re"); out != "--reset \n--reset=\n" {
+		t.Errorf("patch --re: %q", out)
+	}
+	if out, _ := e.complete(nil, "rpak patch --reset=f", "20", "f"); out != "force-runtime \n" {
+		t.Errorf("patch --reset=f: %q", out)
+	}
+	// --force-runtime: the apps installed in the user installation.
+	os.MkdirAll(filepath.Join(e.base, "app", "org.example.C", "x86_64", "stable", "c"), 0o755)
+	os.Symlink("c", filepath.Join(e.base, "app", "org.example.C", "x86_64", "stable", "active"))
+	if out, _ := e.complete(nil, "rpak patch --force-runtime ", "27", ""); out != "org.example.C \n" {
+		t.Errorf("patch --force-runtime: %q", out)
+	}
+	// reset: the ids of the apps with a record, not those already given.
+	os.MkdirAll(filepath.Join(e.base, "rpak"), 0o755)
+	os.WriteFile(filepath.Join(e.base, "rpak", "patches.json"), []byte(`{"version":1,"apps":{
+		"app/org.example.A/x86_64/stable":{"force-runtime":{"method":"patch"}},
+		"app/org.example.B/x86_64/stable":{"force-runtime":{"method":"reexport"}}}}`), 0o644)
+	if out, _ := e.complete(nil, "rpak patch --reset org.example.A ", "33", ""); out != "org.example.B \n" {
+		t.Errorf("reset: %q", out)
 	}
 }

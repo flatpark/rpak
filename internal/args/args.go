@@ -37,7 +37,18 @@ type Parsed struct {
 	// Unknown lists options this parser does not know; they are treated as
 	// flags without a value.
 	Unknown []string
+	// ForceRuntime reports rpak's own --force-runtime[=TARGET], which is
+	// not flatpak's and must be taken out (StripForceRuntime) before
+	// flatpak gets the command line; ForceTarget is its value, "" for
+	// none.
+	ForceRuntime bool
+	ForceTarget  string
 }
+
+// ForceRuntimeOption is rpak's option to force an app's runtime. Its value
+// is optional, so it is only ever --force-runtime or --force-runtime=VALUE:
+// the next argument is never taken as its value.
+const ForceRuntimeOption = "--force-runtime"
 
 // Long options that take a value, from the GOptionEntry tables of flatpak
 // 1.18 (app/flatpak-builtins-{update,install}.c and user_entries in
@@ -121,6 +132,10 @@ func Parse(command string, argv []string) Parsed {
 			}
 			if skipOptions[name] {
 				skip(name)
+			}
+			if name == ForceRuntimeOption {
+				p.ForceRuntime, p.ForceTarget = true, value
+				continue
 			}
 			switch name {
 			case "--user", "--system":
@@ -209,4 +224,58 @@ func LocalLocation(arg string) bool {
 		}
 	}
 	return strings.HasSuffix(arg, ".flatpakref") || strings.HasSuffix(arg, ".flatpak")
+}
+
+// StripForceRuntime returns argv without rpak's --force-runtime options;
+// everything else stays as it is, in order. Arguments after "--" are not
+// options.
+func StripForceRuntime(argv []string) []string {
+	out := make([]string, 0, len(argv))
+	for i, arg := range argv {
+		if arg == "--" {
+			return append(out, argv[i:]...)
+		}
+		if name, _, _ := strings.Cut(arg, "="); name == ForceRuntimeOption {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+// Options returns the options of argv (the arguments after
+// "update"/"install"), each with its value if given separately, in order,
+// without the positional arguments, "--" and rpak's --force-runtime: what
+// to give flatpak again with other positional arguments.
+func Options(command string, argv []string) []string {
+	values := valueOptions[command]
+	var out []string
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		switch {
+		case arg == "--":
+			return out
+		case strings.HasPrefix(arg, "--"):
+			name, _, hasValue := strings.Cut(arg, "=")
+			if name == ForceRuntimeOption {
+				continue
+			}
+			out = append(out, arg)
+			if values[name] && !hasValue && i+1 < len(argv) {
+				i++
+				out = append(out, argv[i])
+			}
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			out = append(out, arg)
+		}
+	}
+	return out
+}
+
+// TakesValue reports whether a long option of the command takes a value.
+func TakesValue(command, name string) bool { return valueOptions[command][name] }
+
+// InstallTakes reports whether flatpak install knows a long option.
+func InstallTakes(name string) bool {
+	return valueOptions["install"][name] || flagOptions["install"][name] || globalFlags[name]
 }

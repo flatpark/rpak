@@ -407,3 +407,11 @@ func matches(ref, pattern string) bool {
 	}
 	return true
 }
+
+// Matches reports whether a full ref is selected by a REF argument of
+// update (see matches).
+func Matches(ref, pattern string) bool { return matches(ref, pattern) }
+
+// MatchesAny reports whether a full ref is selected by update's REF
+// arguments; none select everything.
+func MatchesAny(ref string, patterns []string) bool { return matchesAny(ref, patterns) }

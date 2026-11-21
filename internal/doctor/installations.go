@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/flatpark/rpak/internal/clean"
+	fr "github.com/flatpark/rpak/internal/forceruntime"
 	"github.com/flatpark/rpak/internal/installation"
 	"github.com/flatpark/rpak/internal/lock"
 	"github.com/flatpark/rpak/internal/prefetch"
@@ -367,7 +368,11 @@ func (d *doctor) refsItems(s *builder, in *instInfo) {
 		if opts != "" {
 			opts = ", " + opts
 		}
-		s.add("remote %s  %s  (priority %s%s)", rem.Name, RedactURL(rem.URL), rem.Priority, opts)
+		note := ""
+		if in.inst.User && rem.Name == fr.RemoteName {
+			note = "  rpak force-runtime's local repository of reexported apps"
+		}
+		s.add("remote %s  %s  (priority %s%s)%s", rem.Name, RedactURL(rem.URL), rem.Priority, opts, note)
 	}
 
 	counts := func(l refList, what string) string {

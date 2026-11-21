@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	fr "github.com/flatpark/rpak/internal/forceruntime"
 	"github.com/flatpark/rpak/internal/metadata"
 	"github.com/flatpark/rpak/internal/prefetch"
 	"github.com/flatpark/rpak/internal/summary"
@@ -220,6 +221,23 @@ func (d *doctor) appDetails(id string, ai *appInst) {
 		},
 		func() { remote, ai.remoteErr = d.remoteRef(ai.in, origin, ref) },
 	)
+	// A reexported app comes from rpak-local; its extra-data are
+	// upstream's, checked there.
+	if r, ok := d.force.record(ai.in.inst.User, ref); ok && r.Method == fr.MethodReexport && origin == fr.RemoteName {
+		upstream, err := d.remoteRef(ai.in, r.Remote, ref)
+		if err != nil {
+			ai.remoteErr = fmt.Errorf("upstream: %w", err)
+			return
+		}
+		ai.remoteErr = nil
+		label := "upstream remote " + r.Remote + " commit"
+		if upstream.Commit == r.Upstream {
+			ai.checks = append(ai.checks, d.checkCommit(upstream.Metadata, ref, label+", the one reexported"))
+		} else {
+			ai.checks = append(ai.checks, d.checkCommit(upstream.Metadata, ref, label+", newer than the one reexported: rpak update reexports it"))
+		}
+		return
+	}
 	switch {
 	case remote != nil && remote.Commit == commit:
 		ai.checks = append(ai.checks, d.checkCommit(remote.Metadata, ref, "installed and remote commit"))
@@ -428,6 +446,8 @@ func (d *doctor) appSection(a *appInfo, insts []*instInfo, ps psInfo) Section {
 			}
 			s.add("runtime: %s  %s", rt, text)
 		}
+
+		d.forcedItems(s, ai, d.force)
 
 		if ai.permErr != nil {
 			s.add("permissions (flatpak info --show-permissions): %v", ai.permErr)
