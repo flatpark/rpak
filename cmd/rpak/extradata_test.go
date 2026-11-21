@@ -229,11 +229,12 @@ func TestPatchListExtraData(t *testing.T) {
 	e := newEnv(t)
 	installedExtra(t, e, "app/org.example.App/x86_64/stable", true)
 	out, err := e.command("patch", "--list").Output()
-	want := "App                            Patch          Built for                              Runs on                                Method    Remote   Target\n" +
-		"org.example.App/x86_64/stable  force-runtime  org.freedesktop.Platform/x86_64/25.08  org.freedesktop.Platform/x86_64/26.08  reexport  flathub  26.08\n" +
+	want := "App              Runtime\n" +
+		"org.example.App  org.freedesktop.Platform 25.08 → 26.08 (pinned)\n" +
 		"\n" +
-		"App                            Patch       Name     URL                                Upstream's URL                     Remote\n" +
-		"org.example.App/x86_64/stable  extra-data  app.deb  https://new.example.com/app_2.deb  https://old.example.com/app_1.deb  flathub\n"
+		"org.example.App  app.deb\n" +
+		"  url       https://new.example.com/app_2.deb\n" +
+		"  upstream  https://old.example.com/app_1.deb\n"
 	if err != nil || string(out) != want {
 		t.Errorf("%v:\n%s\nwant\n%s", err, out, want)
 	}

@@ -163,8 +163,8 @@ func TestPatchList(t *testing.T) {
 	e := newEnv(t)
 	installedForced(t, e, "app/org.example.App/x86_64/stable")
 	out, err := e.command("patch").Output()
-	want := "App                            Patch          Built for                              Runs on                                Method  Remote   Target\n" +
-		"org.example.App/x86_64/stable  force-runtime  org.freedesktop.Platform/x86_64/25.08  org.freedesktop.Platform/x86_64/26.08  patch   flathub  26.08\n"
+	want := "App              Runtime\n" +
+		"org.example.App  org.freedesktop.Platform 25.08 → 26.08 (pinned)\n"
 	if err != nil || string(out) != want {
 		t.Errorf("%v:\n%s\nwant\n%s", err, out, want)
 	}

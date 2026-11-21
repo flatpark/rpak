@@ -194,7 +194,10 @@ rpak: Undo: rpak patch --reset=extra-data com.visualstudio.code
 - A failed download changes and records nothing.
 
 rpak remembers what it patched (`rpak patch` lists it, from
-`<user installation>/rpak/patches.json`); later `rpak update` and
+`<user installation>/rpak/patches.json`: the runtime change, `(pinned)`
+when a target was given, and the replaced extra-data URLs; `rpak doctor`
+shows the rest: method, upstream remote and commit, checksums, and how
+each deployment stands now); later `rpak update` and
 `rpak install` keep it, with or without APP arguments. `rpak patch --reset
 APP` undoes an app's patches, `--reset=force-runtime` or
 `--reset=extra-data` just one kind: rpak forgets them and reinstalls the
