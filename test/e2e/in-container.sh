@@ -659,6 +659,214 @@ rpak patch | tee /tmp/fr-list.log
 ! grep -q 'org.rpak.test.Extra2' /tmp/fr-list.log || fail "org.rpak.test.Extra2 is still listed"
 pass "reset reinstalled org.rpak.test.Extra2 from upstream on branch 1; rpak-local and local-repo are gone"
 
+step "extra-data: org.rpak.test.Extra moves to org.rpak.test.Platform//1, installed by flatpak"
+# Upstream rebuilds org.rpak.test.Extra on the busybox runtime, which
+# flatpak can install, so that resetting goes back to upstream for real.
+# Its extra-data are files of $www; apply_extra upper-cases payload.txt
+# into marker and notes the runtime it ran in.
+publish_xd() { # version, then NAME FILE...: the extra-data, files of $www
+	local version=$1 dir=/tmp/xd-$1 n=0 s
+	shift
+	rm -rf "$dir"
+	mkdir -p "$dir/files/bin" "$dir/export"
+	{
+		# sdk=: without it flatpak info aborts (it passes its error to
+		# g_key_file_get_string() for the sdk and returns success).
+		printf '[Application]\nname=org.rpak.test.Extra\nruntime=org.rpak.test.Platform/%s/1\nsdk=org.rpak.test.Platform/%s/1\ncommand=extra\n\n[Extra Data]\n' "$arch" "$arch"
+		while [ $# -gt 0 ]; do
+			s=
+			[ "$n" -eq 0 ] || s=$n
+			printf 'name%s=%s\nchecksum%s=%s\nsize%s=%s\nuri%s=%s/%s\n' "$s" "$1" "$s" "$(sha256sum "$www/$2" | cut -d' ' -f1)" \
+				"$s" "$(stat -c %s "$www/$2")" "$s" "$url" "$2"
+			n=$((n + 1))
+			shift 2
+		done
+	} > "$dir/metadata"
+	printf '#!/bin/sh\nset -e\ntr a-z A-Z < payload.txt > marker\nrm payload.txt\n. /usr/lib/os-release && echo "$VERSION_ID" > runtime-version\n' > "$dir/files/bin/apply_extra"
+	printf '#!/bin/sh\ncat /app/extra/marker\n' > "$dir/files/bin/extra"
+	echo "$version" > "$dir/files/version"
+	chmod +x "$dir/files/bin/apply_extra" "$dir/files/bin/extra"
+	flatpak build-export --arch="$arch" "$up" "$dir" stable >/dev/null
+}
+xd=$FLATPAK_USER_DIR/app/org.rpak.test.Extra/$arch/stable/active/files
+patches=$FLATPAK_USER_DIR/rpak/patches.json
+# The extra-data record of org.rpak.test.Extra: FIELD of it, or of its
+# first source (url, sha256, base_url); "none" without one.
+xrec() {
+	python3 - "$patches" "app/org.rpak.test.Extra/$arch/stable" "$1" <<'PY'
+import json, sys
+try:
+    r = json.load(open(sys.argv[1]))["apps"][sys.argv[2]]["extra-data"]
+except (OSError, KeyError):
+    print("none")
+    sys.exit()
+s = r["sources"][0]
+print({"url": s["url"], "sha256": s["sha256"], "base_url": s["base"]["url"]}.get(sys.argv[3]) or r[sys.argv[3]])
+PY
+}
+gets() { grep -c "\"GET /$1 " /tmp/http.log || true; }
+origin() { flatpak info --user --show-origin org.rpak.test.Extra; }
+upcommit() { flatpak remote-info --user -c upstream org.rpak.test.Extra; }
+echo "payload 10" > "$www/xd-10.txt"
+publish_xd 10 payload.txt xd-10.txt
+flatpak install --user -y --noninteractive upstream org.rpak.test.Extra >/dev/null 2>&1 || fail "flatpak install org.rpak.test.Extra"
+[ "$(cat "$xd/extra/marker")" = "PAYLOAD 10" ] && [ "$(origin)" = upstream ] || fail "installed: $(cat "$xd/extra/marker"), from $(origin)"
+pass "org.rpak.test.Extra 10 installed by flatpak from upstream, payload.txt from $url/xd-10.txt"
+
+step "extra-data: RPAK_DRY_RUN=1 rpak patch --extra-data=URL"
+echo "fresh 1" > "$www/new-1.txt"
+state > /tmp/state.before
+RPAK_DRY_RUN=1 rpak patch -y --extra-data="$url/new-1.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "dry run"; }
+cat /tmp/xd.log
+state > /tmp/state.after
+diff /tmp/state.before /tmp/state.after || fail "the dry run changed files"
+[ "$(gets new-1.txt)" = 0 ] || fail "the dry run downloaded new-1.txt"
+grep -qxF "rpak: dry run, would download $url/new-1.txt as payload.txt of org.rpak.test.Extra, instead of $url/xd-10.txt" /tmp/xd.log || fail "dry run: no download line"
+grep -q "^rpak: dry run, would run: .*flatpak build-export .*rpak.extra-data=payload.txt:<sha256 of payload.txt>" /tmp/xd.log || fail "dry run: no export"
+grep -q "^rpak: dry run, would run: .*flatpak install -y --user --reinstall rpak-local app/org.rpak.test.Extra/$arch/stable\$" /tmp/xd.log || fail "dry run: no install"
+grep -qxF "rpak: dry run, would record org.rpak.test.Extra in $patches: extra-data payload.txt, $url/new-1.txt instead of $url/xd-10.txt" /tmp/xd.log || fail "dry run: no record line"
+! grep -q experimental /tmp/xd.log || fail "the dry run announced"
+pass "the dry run shows the download, the export, the install and the record, and downloads and changes nothing"
+
+step "extra-data a: rpak patch --extra-data=URL"
+rpak patch -y --extra-data="$url/new-1.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "rpak patch --extra-data"; }
+grep '^rpak' /tmp/xd.log
+grep -qxF "rpak: Using source payload.txt ($url/xd-10.txt → $url/new-1.txt)" /tmp/xd.log || fail "the chosen source is not said"
+grep -q "^rpak: experimental: org.rpak.test.Extra downloads its extra-data payload.txt from $url/new-1.txt (.*) instead of $url/xd-10.txt; " /tmp/xd.log || fail "no experimental line"
+[ "$(grep -A1 '^rpak: experimental: org.rpak.test.Extra downloads' /tmp/xd.log | tail -1)" = "rpak: Undo: rpak patch --reset=extra-data org.rpak.test.Extra" ] || fail "the warning does not end with Undo"
+[ "$(cat "$xd/extra/marker")" = "FRESH 1" ] || fail "apply_extra had $(cat "$xd/extra/marker")"
+[ "$(cat "$xd/version")" = 10 ] || fail "the version changed: $(cat "$xd/version")"
+[ "$(origin)" = rpak-local ] || fail "origin $(origin)"
+[ "$(xrec url)" = "$url/new-1.txt" ] && [ "$(xrec base_url)" = "$url/xd-10.txt" ] && [ "$(xrec sha256)" = "$(sha256sum "$www/new-1.txt" | cut -d' ' -f1)" ] ||
+	fail "patches.json: $(cat "$patches")"
+[ "$(xrec upstream_commit)" = "$(upcommit)" ] || fail "upstream_commit $(xrec upstream_commit)"
+pass "apply_extra got the new file, still version 10; origin rpak-local; patches.json has url, sha256, upstream's url and commit"
+[ "$(gets new-1.txt)" = 1 ] || fail "new-1.txt was asked for $(gets new-1.txt) times"
+grep -q "^rpak: [0-9:.]* reusing payload.txt from an earlier run\$" /tmp/xd.log || fail "the install did not reuse rpak's download"
+leftover=$(find "$extra" -mindepth 1 2>/dev/null | head -5)
+[ -z "$leftover" ] || fail "left in $extra: $leftover"
+pass "downloaded once (one GET in the server's log): the install from rpak-local reused the file, nothing is left in $extra"
+
+step "extra-data b: with --force-runtime, then --reset=extra-data, then --reset"
+rpak patch -y --force-runtime org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "rpak patch --force-runtime"; }
+grep '^rpak' /tmp/xd.log
+[ "$(cat "$xd/extra/runtime-version")" = 2 ] && [ "$(cat "$xd/extra/marker")" = "FRESH 1" ] || fail "runtime $(cat "$xd/extra/runtime-version"), $(cat "$xd/extra/marker")"
+# Plain --reset would undo the replaced payload.txt too.
+grep -qxF "rpak: experimental: org.rpak.test.Extra was built for org.rpak.test.Platform/$arch/1, now runs on org.rpak.test.Platform/$arch/2; it may break. Undo: rpak patch --reset=force-runtime org.rpak.test.Extra" /tmp/xd.log ||
+	fail "the experimental line does not undo force-runtime alone"
+rpak patch | tee /tmp/xd-list.log
+grep -Eq "^org.rpak.test.Extra/$arch/stable +force-runtime +org.rpak.test.Platform/$arch/1 +org.rpak.test.Platform/$arch/2 +reexport +upstream +latest\$" /tmp/xd-list.log || fail "list: no force-runtime line"
+grep -Eq "^org.rpak.test.Extra/$arch/stable +extra-data +payload.txt +$url/new-1.txt +$url/xd-10.txt +upstream\$" /tmp/xd-list.log || fail "list: no extra-data line"
+pass "both patches at once: apply_extra ran in branch 2 on the new file; rpak patch lists both"
+rpak patch -y --reset=extra-data org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "--reset=extra-data"; }
+grep '^rpak' /tmp/xd.log
+! grep -q "^rpak: installing runtime" /tmp/xd.log || fail "--reset=extra-data installed runtimes"
+[ "$(cat "$xd/extra/marker")" = "PAYLOAD 10" ] && [ "$(cat "$xd/extra/runtime-version")" = 2 ] && [ "$(origin)" = rpak-local ] ||
+	fail "after --reset=extra-data: $(cat "$xd/extra/marker"), runtime $(cat "$xd/extra/runtime-version"), from $(origin)"
+[ "$(xrec url)" = none ] || fail "the extra-data record is left"
+rpak patch | grep -q "^org.rpak.test.Extra/.* force-runtime " || fail "the force-runtime patch went too"
+pass "--reset=extra-data: upstream's file again, still on branch 2 from rpak-local"
+rpak patch -y --reset org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "--reset"; }
+grep '^rpak' /tmp/xd.log
+[ "$(origin)" = upstream ] && [ "$(cat "$xd/extra/runtime-version")" = 1 ] && [ "$(cat "$xd/extra/marker")" = "PAYLOAD 10" ] ||
+	fail "after --reset: from $(origin), runtime $(cat "$xd/extra/runtime-version")"
+! flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local is still there"
+[ ! -e "$FLATPAK_USER_DIR/rpak/local-repo" ] || fail "local-repo is still there"
+! rpak patch | grep -q org.rpak.test.Extra || fail "still listed"
+pass "--reset: back to upstream on branch 1; rpak-local and local-repo are gone"
+
+step "extra-data c: upstream moves on"
+echo "fresh 2" > "$www/new-2.txt"
+rpak patch -y --extra-data="$url/new-2.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "rpak patch --extra-data"; }
+publish_xd 11 payload.txt xd-10.txt
+rpak update -y > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "rpak update"; }
+grep '^rpak' /tmp/xd.log
+[ "$(cat "$xd/version")" = 11 ] && [ "$(cat "$xd/extra/marker")" = "FRESH 2" ] && [ "$(origin)" = rpak-local ] ||
+	fail "after the update: version $(cat "$xd/version"), $(cat "$xd/extra/marker"), from $(origin)"
+[ "$(xrec upstream_commit)" = "$(upcommit)" ] || fail "upstream_commit $(xrec upstream_commit), upstream has $(upcommit)"
+pass "upstream 11 with the same payload.txt: updated to 11, the patch kept, the record on upstream's new commit"
+echo "payload 12" > "$www/xd-12.txt"
+publish_xd 12 payload.txt xd-12.txt
+rpak update -y > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "rpak update"; }
+grep '^rpak' /tmp/xd.log
+grep -qxF "rpak: org.rpak.test.Extra: upstream updated payload.txt, extra-data patch dropped" /tmp/xd.log || fail "the drop is not said"
+[ "$(origin)" = upstream ] && [ "$(cat "$xd/version")" = 12 ] && [ "$(cat "$xd/extra/marker")" = "PAYLOAD 12" ] ||
+	fail "after the update: from $(origin), version $(cat "$xd/version"), $(cat "$xd/extra/marker")"
+[ "$(xrec url)" = none ] || fail "the record is left"
+! flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local is still there"
+pass "upstream 12 changed payload.txt: the patch dropped, org.rpak.test.Extra 12 from upstream, rpak-local gone"
+
+step "extra-data d: two sources, a URL that fits both"
+echo "other 13" > "$www/xd-other.txt"
+publish_xd 13 payload.txt xd-12.txt other.txt xd-other.txt
+flatpak update --user -y --noninteractive org.rpak.test.Extra >/dev/null 2>&1 || fail "flatpak update"
+echo "fresh 3" > "$www/new-3.txt"
+code=0
+rpak patch -y --extra-data="$url/new-3.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || code=$?
+cat /tmp/xd.log
+[ "$code" = 2 ] || fail "exit $code"
+grep -q "cannot tell which extra-data $url/new-3.txt replaces; give the source as NAME=URL, one of:\$" /tmp/xd.log || fail "no explanation"
+grep -qxF "  payload.txt  $url/xd-12.txt" /tmp/xd.log && grep -qxF "  other.txt  $url/xd-other.txt" /tmp/xd.log || fail "the sources are not listed"
+[ "$(gets new-3.txt)" = 0 ] && [ "$(origin)" = upstream ] || fail "downloaded or changed"
+pass "exit 2, both sources listed with their URLs, nothing downloaded"
+rpak patch -y --extra-data="payload.txt=$url/new-3.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "NAME=URL"; }
+! grep -q "Using source" /tmp/xd.log || fail "a given NAME was chosen"
+[ "$(cat "$xd/extra/marker")" = "FRESH 3" ] && [ "$(cat "$xd/extra/other.txt")" = "other 13" ] || fail "after NAME=URL: $(cat "$xd/extra/marker")"
+pass "payload.txt=URL replaced payload.txt, other.txt is upstream's"
+rpak patch -y --reset org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "--reset"; }
+
+step "extra-data e: a URL that is not there"
+commit=$(flatpak info --user --show-commit org.rpak.test.Extra)
+code=0
+rpak patch -y --extra-data="payload.txt=$url/missing.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || code=$?
+grep '^rpak' /tmp/xd.log
+[ "$code" = 1 ] || fail "exit $code"
+grep -q "404" /tmp/xd.log || fail "no 404"
+[ "$(xrec url)" = none ] && [ "$(origin)" = upstream ] && [ "$(flatpak info --user --show-commit org.rpak.test.Extra)" = "$commit" ] || fail "recorded or changed"
+leftover=$(find "$extra" -mindepth 1 2>/dev/null | head -5)
+[ -z "$leftover" ] || fail "left in $extra: $leftover"
+pass "404: exit 1, no record, the deployment and $extra as they were"
+
+step "extra-data f: --force-runtime and --extra-data at once, then flatpak outside rpak"
+echo "fresh 4" > "$www/new-4.txt"
+rpak patch -y --force-runtime --extra-data="payload.txt=$url/new-4.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "both"; }
+grep '^rpak' /tmp/xd.log
+grep -q "^rpak: experimental: org.rpak.test.Extra was built for org.rpak.test.Platform/$arch/1, now runs on org.rpak.test.Platform/$arch/2" /tmp/xd.log &&
+	grep -q "^rpak: experimental: org.rpak.test.Extra downloads its extra-data payload.txt from $url/new-4.txt " /tmp/xd.log || fail "not both announced"
+[ "$(cat "$xd/extra/marker")" = "FRESH 4" ] && [ "$(cat "$xd/extra/runtime-version")" = 2 ] && [ "$(origin)" = rpak-local ] || fail "not both applied"
+pass "one rpak patch made both patches"
+publish_xd 14 payload.txt xd-12.txt other.txt xd-other.txt
+flatpak update --user -y --noninteractive org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "flatpak update"; }
+flatpak repair --user > /tmp/repair.log 2>&1 || { cat /tmp/repair.log; fail "flatpak repair"; }
+[ "$(cat "$xd/version")" = 13 ] && [ "$(cat "$xd/extra/marker")" = "FRESH 4" ] && [ "$(origin)" = rpak-local ] ||
+	fail "after flatpak update and repair: version $(cat "$xd/version"), $(cat "$xd/extra/marker"), from $(origin)"
+[ "$(flatpak run --user org.rpak.test.Extra)" = "FRESH 4" ] || fail "does not run"
+pass "flatpak update finds nothing new in rpak-local, flatpak repair leaves it; the app runs"
+rpak doctor org.rpak.test.Extra > /tmp/xd-doctor.log 2>&1 || { cat /tmp/xd-doctor.log; fail "rpak doctor"; }
+sed -n '/^== Patches/,/^== /p;/^== App org.rpak.test.Extra/,/^Data and state/p' /tmp/xd-doctor.log
+grep -q "^  org.rpak.test.Extra/$arch/stable  extra-data: payload.txt from $url/new-4.txt (.*) instead of upstream's $url/xd-12.txt  (upstream remote upstream, upstream commit [0-9a-f]*); deployment: has it\$" /tmp/xd-doctor.log ||
+	fail "doctor: no Patches line"
+grep -qxF "  extra-data replaced: payload.txt from $url/new-4.txt instead of upstream's $url/xd-12.txt  (rpak patch extra-data, upstream remote upstream)" /tmp/xd-doctor.log || fail "doctor: no app line"
+grep -Eq "^  extra-data payload.txt  $url/new-4.txt  HTTP 200, .*  \(installed commit, extra-data replaced by rpak patch extra-data\)\$" /tmp/xd-doctor.log || fail "doctor: the URL used is not checked"
+grep -Eq "^  extra-data payload.txt  $url/xd-12.txt  .*\(upstream remote upstream commit, newer than the one reexported: .*; rpak replaced payload.txt\)\$" /tmp/xd-doctor.log || fail "doctor: upstream's URL is not shown"
+! grep -Eq "differs from its commit|has no record|not replaced now" /tmp/xd-doctor.log || fail "doctor: $(grep -E 'differs from its commit|has no record|not replaced now' /tmp/xd-doctor.log)"
+pass "rpak doctor: the URL used and upstream's, each checked; nothing taken for a problem"
+flatpak mask --user org.rpak.test.Extra
+recorded=$(xrec upstream_commit)
+rpak update -y > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "rpak update, masked"; }
+[ "$(cat "$xd/version")" = 13 ] && [ "$(xrec upstream_commit)" = "$recorded" ] || fail "masked, but updated or recorded: version $(cat "$xd/version")"
+pass "masked: rpak update neither reexports nor records it, flatpak does not update it"
+flatpak mask --user --remove org.rpak.test.Extra
+rpak update -y > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "rpak update"; }
+grep '^rpak' /tmp/xd.log
+[ "$(cat "$xd/version")" = 14 ] && [ "$(cat "$xd/extra/marker")" = "FRESH 4" ] && [ "$(cat "$xd/extra/runtime-version")" = 2 ] &&
+	[ "$(origin)" = rpak-local ] && [ "$(xrec upstream_commit)" = "$(upcommit)" ] || fail "rpak update did not bring 14 with both patches"
+pass "unmasked, rpak update brings upstream 14 with both patches"
+rpak patch -y --reset org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "--reset"; }
+[ "$(origin)" = upstream ] && [ "$(cat "$xd/extra/marker")" = "PAYLOAD 12" ] || fail "after the last reset"
+! flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local is still there"
+pass "reset: org.rpak.test.Extra 14 from upstream as built, rpak-local gone"
+
 kill "$http_pid" 2>/dev/null || true
 unset no_proxy NO_PROXY
 

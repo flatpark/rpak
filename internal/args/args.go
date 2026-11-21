@@ -43,12 +43,20 @@ type Parsed struct {
 	// none.
 	ForceRuntime bool
 	ForceTarget  string
+	// ExtraData are the values of rpak's --extra-data=[NAME=]URL, in
+	// order; like --force-runtime it is taken out before flatpak gets the
+	// command line.
+	ExtraData []string
 }
 
 // ForceRuntimeOption is rpak's option to force an app's runtime. Its value
 // is optional, so it is only ever --force-runtime or --force-runtime=VALUE:
 // the next argument is never taken as its value.
 const ForceRuntimeOption = "--force-runtime"
+
+// ExtraDataOption is rpak's option to replace an extra-data source. Its
+// value is required: --extra-data=[NAME=]URL or --extra-data [NAME=]URL.
+const ExtraDataOption = "--extra-data"
 
 // Long options that take a value, from the GOptionEntry tables of flatpak
 // 1.18 (app/flatpak-builtins-{update,install}.c and user_entries in
@@ -126,9 +134,13 @@ func Parse(command string, argv []string) Parsed {
 			i = len(argv)
 		case strings.HasPrefix(arg, "--"):
 			name, value, hasValue := strings.Cut(arg, "=")
-			if values[name] && !hasValue && i+1 < len(argv) {
+			if (values[name] || name == ExtraDataOption) && !hasValue && i+1 < len(argv) {
 				i++
 				value, hasValue = argv[i], true
+			}
+			if name == ExtraDataOption {
+				p.ExtraData = append(p.ExtraData, value)
+				continue
 			}
 			if skipOptions[name] {
 				skip(name)
@@ -226,16 +238,24 @@ func LocalLocation(arg string) bool {
 	return strings.HasSuffix(arg, ".flatpakref") || strings.HasSuffix(arg, ".flatpak")
 }
 
-// StripForceRuntime returns argv without rpak's --force-runtime options;
-// everything else stays as it is, in order. Arguments after "--" are not
-// options.
+// StripForceRuntime returns argv without rpak's own options,
+// --force-runtime and --extra-data (with its value); everything else stays
+// as it is, in order. Arguments after "--" are not options.
 func StripForceRuntime(argv []string) []string {
 	out := make([]string, 0, len(argv))
-	for i, arg := range argv {
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
 		if arg == "--" {
 			return append(out, argv[i:]...)
 		}
-		if name, _, _ := strings.Cut(arg, "="); name == ForceRuntimeOption {
+		name, _, hasValue := strings.Cut(arg, "=")
+		if name == ForceRuntimeOption {
+			continue
+		}
+		if name == ExtraDataOption {
+			if !hasValue {
+				i++
+			}
 			continue
 		}
 		out = append(out, arg)
@@ -245,7 +265,7 @@ func StripForceRuntime(argv []string) []string {
 
 // Options returns the options of argv (the arguments after
 // "update"/"install"), each with its value if given separately, in order,
-// without the positional arguments, "--" and rpak's --force-runtime: what
+// without the positional arguments, "--" and rpak's own options: what
 // to give flatpak again with other positional arguments.
 func Options(command string, argv []string) []string {
 	values := valueOptions[command]
@@ -258,6 +278,12 @@ func Options(command string, argv []string) []string {
 		case strings.HasPrefix(arg, "--"):
 			name, _, hasValue := strings.Cut(arg, "=")
 			if name == ForceRuntimeOption {
+				continue
+			}
+			if name == ExtraDataOption {
+				if !hasValue {
+					i++
+				}
 				continue
 			}
 			out = append(out, arg)

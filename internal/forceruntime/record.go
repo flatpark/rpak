@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/flatpark/rpak/internal/extradata"
 )
 
 // Methods of forcing, see the package comment.
@@ -52,10 +54,12 @@ func (r Record) ID() string {
 
 // The patches file holds what rpak changed about installed apps, by app:
 //
-//	{"version": 1, "apps": {"app/ID/ARCH/BRANCH": {"force-runtime": {...}}}}
+//	{"version": 1, "apps": {"app/ID/ARCH/BRANCH": {"force-runtime": {...}, "extra-data": {...}}}}
 //
-// force-runtime is the only kind of patch so far. Kinds rpak does not know
-// are kept as they are when the file is rewritten.
+// Kinds of patch are force-runtime (Record) and extra-data (ExtraRecord).
+// Kinds rpak does not know are kept as they are when the file is
+// rewritten, so a new kind needs no new version: a version 1 file of an
+// rpak that only knew force-runtime is read as it is.
 type file struct {
 	Version int                                   `json:"version"`
 	Apps    map[string]map[string]json.RawMessage `json:"apps"`
@@ -63,8 +67,10 @@ type file struct {
 
 const (
 	fileVersion = 1
-	// Kind is the name of this patch in the patches file.
+	// Kind is the name of a forced runtime in the patches file.
 	Kind = "force-runtime"
+	// ExtraKind is the name of replaced extra-data sources.
+	ExtraKind = "extra-data"
 )
 
 // Dir is where rpak keeps what it needs for patching in an installation:
@@ -105,27 +111,40 @@ func readFile(installation string) (file, error) {
 	return f, nil
 }
 
+// loadKind reads the patches of one kind, by ref, sorted by ref.
+func loadKind(installation, kind string) ([]string, map[string]json.RawMessage, error) {
+	f, err := readFile(installation)
+	if err != nil {
+		return nil, nil, err
+	}
+	var refs []string
+	raws := map[string]json.RawMessage{}
+	for ref, patches := range f.Apps {
+		if raw, ok := patches[kind]; ok {
+			refs = append(refs, ref)
+			raws[ref] = raw
+		}
+	}
+	sort.Strings(refs)
+	return refs, raws, nil
+}
+
 // Load reads the force-runtime patches, sorted by ref; a missing file has
 // none.
 func Load(installation string) ([]Record, error) {
-	f, err := readFile(installation)
+	refs, raws, err := loadKind(installation, Kind)
 	if err != nil {
 		return nil, err
 	}
 	var out []Record
-	for ref, patches := range f.Apps {
-		raw, ok := patches[Kind]
-		if !ok {
-			continue
-		}
+	for _, ref := range refs {
 		var r Record
-		if err := json.Unmarshal(raw, &r); err != nil {
+		if err := json.Unmarshal(raws[ref], &r); err != nil {
 			return nil, fmt.Errorf("%s: %s: %w", RecordsPath(installation), ref, err)
 		}
 		r.Ref = ref
 		out = append(out, r)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
 	return out, nil
 }
 
@@ -134,6 +153,20 @@ func Load(installation string) ([]Record, error) {
 // A file left without patches is removed: no file is the cheap sign that
 // nothing is patched.
 func Save(installation string, records []Record) error {
+	raws := map[string]json.RawMessage{}
+	for _, r := range records {
+		raw, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		raws[r.Ref] = raw
+	}
+	return saveKind(installation, Kind, raws)
+}
+
+// saveKind makes raws, by ref, the patches of a kind in the file, keeping
+// the other kinds; see Save.
+func saveKind(installation, kind string, raws map[string]json.RawMessage) error {
 	path := RecordsPath(installation)
 	f, err := readFile(installation)
 	if err != nil {
@@ -144,17 +177,13 @@ func Save(installation string, records []Record) error {
 		f.Apps = map[string]map[string]json.RawMessage{}
 	}
 	for _, patches := range f.Apps {
-		delete(patches, Kind)
+		delete(patches, kind)
 	}
-	for _, r := range records {
-		raw, err := json.Marshal(r)
-		if err != nil {
-			return err
+	for ref, raw := range raws {
+		if f.Apps[ref] == nil {
+			f.Apps[ref] = map[string]json.RawMessage{}
 		}
-		if f.Apps[r.Ref] == nil {
-			f.Apps[r.Ref] = map[string]json.RawMessage{}
-		}
-		f.Apps[r.Ref][Kind] = raw
+		f.Apps[ref][kind] = raw
 	}
 	for ref, patches := range f.Apps {
 		if len(patches) == 0 {
@@ -176,6 +205,92 @@ func Save(installation string, records []Record) error {
 		return err
 	}
 	return WriteFileAtomic(path, append(data, '\n'), 0o644)
+}
+
+// ExtraRecord is an app whose extra-data sources are replaced (rpak
+// --extra-data, see package extradata). It is always reexported.
+type ExtraRecord struct {
+	// Ref is the app's full ref, app/ID/ARCH/BRANCH: the key in the file.
+	Ref string `json:"-"`
+	// Remote is the upstream remote the app comes from.
+	Remote string `json:"remote"`
+	// Upstream is the upstream commit last reexported.
+	Upstream string `json:"upstream_commit"`
+	// Sources are the replaced sources, by name.
+	Sources []extradata.Replacement `json:"sources"`
+}
+
+// LoadExtra reads the extra-data patches, sorted by ref.
+func LoadExtra(installation string) ([]ExtraRecord, error) {
+	refs, raws, err := loadKind(installation, ExtraKind)
+	if err != nil {
+		return nil, err
+	}
+	var out []ExtraRecord
+	for _, ref := range refs {
+		var r ExtraRecord
+		if err := json.Unmarshal(raws[ref], &r); err != nil {
+			return nil, fmt.Errorf("%s: %s: %w", RecordsPath(installation), ref, err)
+		}
+		if len(r.Sources) == 0 {
+			continue
+		}
+		r.Ref = ref
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// SaveExtra makes records the extra-data patches of the file, as Save.
+func SaveExtra(installation string, records []ExtraRecord) error {
+	raws := map[string]json.RawMessage{}
+	for _, r := range records {
+		if len(r.Sources) == 0 {
+			continue
+		}
+		raw, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		raws[r.Ref] = raw
+	}
+	return saveKind(installation, ExtraKind, raws)
+}
+
+// SetExtra replaces the record of r.Ref, or adds it; a record without
+// sources is removed.
+func SetExtra(records []ExtraRecord, r ExtraRecord) []ExtraRecord {
+	if len(r.Sources) == 0 {
+		return RemoveExtra(records, r.Ref)
+	}
+	for i := range records {
+		if records[i].Ref == r.Ref {
+			records[i] = r
+			return records
+		}
+	}
+	return append(records, r)
+}
+
+// RemoveExtra drops the record of ref.
+func RemoveExtra(records []ExtraRecord, ref string) []ExtraRecord {
+	out := records[:0:0]
+	for _, r := range records {
+		if r.Ref != ref {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// FindExtra returns the record of ref.
+func FindExtra(records []ExtraRecord, ref string) (ExtraRecord, bool) {
+	for _, r := range records {
+		if r.Ref == ref {
+			return r, true
+		}
+	}
+	return ExtraRecord{}, false
 }
 
 // Set replaces the record of r.Ref, or adds it.

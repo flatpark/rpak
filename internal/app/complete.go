@@ -238,9 +238,12 @@ func completeCommand(argv []string, stdout io.Writer) int {
 }
 
 // withForceRuntime is flatpak's completion of install/update, plus rpak's
-// own --force-runtime when an option is being typed, and its values after
-// "--force-runtime=".
+// own --force-runtime and --extra-data when an option is being typed, and
+// the values of "--force-runtime=" (a URL is the user's to type).
 func (c *completion) withForceRuntime(stdout io.Writer) int {
+	if strings.HasPrefix(c.cur, args.ExtraDataOption+"=") {
+		return 0
+	}
 	if prefix := args.ForceRuntimeOption + "="; strings.HasPrefix(c.cur, prefix) {
 		for _, v := range []string{"latest "} {
 			if word, ok := c.completeWord(prefix + v); ok {
@@ -251,7 +254,7 @@ func (c *completion) withForceRuntime(stdout io.Writer) int {
 	}
 	code := c.flatpak(stdout)
 	if strings.HasPrefix(c.cur, "--") {
-		for _, candidate := range []string{args.ForceRuntimeOption + " ", args.ForceRuntimeOption + "="} {
+		for _, candidate := range []string{args.ForceRuntimeOption + " ", args.ForceRuntimeOption + "=", args.ExtraDataOption + "="} {
 			if word, ok := c.completeWord(candidate); ok {
 				fmt.Fprintln(stdout, word)
 			}
@@ -261,15 +264,16 @@ func (c *completion) withForceRuntime(stdout io.Writer) int {
 }
 
 // patch completes rpak patch: its options, the values of --reset= and
-// --force-runtime=, and app ids: those with a patch after --reset, the
-// apps installed in the user installation otherwise.
+// --force-runtime=, and app ids: those with a patch (of the kind) after
+// --reset, the apps installed in the user installation otherwise.
 func (c *completion) patch(stdout io.Writer, words []shellWord) {
 	emit := func(candidate string) {
 		if word, ok := c.completeWord(candidate); ok {
 			fmt.Fprintln(stdout, word)
 		}
 	}
-	values := map[string][]string{"--reset=": {fr.Kind + " "}, args.ForceRuntimeOption + "=": {fr.Latest + " "}}
+	values := map[string][]string{"--reset=": {fr.Kind + " ", fr.ExtraKind + " "}, args.ForceRuntimeOption + "=": {fr.Latest + " "},
+		args.ExtraDataOption + "=": nil}
 	for prefix, vs := range values {
 		if strings.HasPrefix(c.cur, prefix) {
 			for _, v := range vs {
@@ -279,7 +283,7 @@ func (c *completion) patch(stdout io.Writer, words []shellWord) {
 		}
 	}
 	if strings.HasPrefix(c.cur, "-") {
-		for _, o := range []string{"--list ", args.ForceRuntimeOption + " ", args.ForceRuntimeOption + "=", "--reset ", "--reset=",
+		for _, o := range []string{"--list ", args.ForceRuntimeOption + " ", args.ForceRuntimeOption + "=", args.ExtraDataOption + "=", "--reset ", "--reset=",
 			"-y ", "--assumeyes ", "--noninteractive ", "--verbose ", "--help "} {
 			emit(o)
 		}
@@ -289,19 +293,27 @@ func (c *completion) patch(stdout io.Writer, words []shellWord) {
 	if err != nil {
 		return
 	}
-	reset := false
+	reset, kind := false, ""
 	given := map[string]bool{}
 	for _, w := range words {
-		if name, _, _ := strings.Cut(w.text, "="); name == "--reset" {
-			reset = true
+		if name, value, _ := strings.Cut(w.text, "="); name == "--reset" {
+			reset, kind = true, value
 		}
 		given[w.text] = true
 	}
 	var refs []string
 	if reset {
-		records, _ := fr.Load(user)
-		for _, r := range records {
-			refs = append(refs, r.Ref)
+		if kind == "" || kind == fr.Kind {
+			records, _ := fr.Load(user)
+			for _, r := range records {
+				refs = append(refs, r.Ref)
+			}
+		}
+		if kind == "" || kind == fr.ExtraKind {
+			extras, _ := fr.LoadExtra(user)
+			for _, r := range extras {
+				refs = append(refs, r.Ref)
+			}
 		}
 	} else {
 		refs = fr.Installed(user, "app")

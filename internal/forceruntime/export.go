@@ -7,8 +7,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 
+	"github.com/flatpark/rpak/internal/extradata"
 	"github.com/flatpark/rpak/internal/metadata"
 	"github.com/flatpark/rpak/internal/ostree"
 )
@@ -20,60 +23,99 @@ type Runner interface {
 }
 
 // Marks in the body of a reexported commit: which upstream commit it was
-// made from, and the runtime it was given.
+// made from, the runtime it was given, and each extra-data source it
+// replaced (extradata.Marks), one line each.
 const (
-	markUpstream = "rpak.upstream="
-	markRuntime  = "rpak.runtime="
+	markUpstream  = "rpak.upstream="
+	markRuntime   = "rpak.runtime="
+	markExtraData = "rpak.extra-data="
 )
 
-// Body is the commit body of a reexport.
-func Body(upstream string, runtime Pref) string {
-	return markUpstream + upstream + "\n" + markRuntime + runtime.String()
+// Job is what a reexport makes of an upstream commit of an app: Runtime
+// the runtime it runs on (forced or not), ExtraData the extra-data
+// sources replaced.
+type Job struct {
+	Ref, Upstream string
+	Runtime       Resolution
+	ExtraData     []extradata.Replacement
+}
+
+// Mark is what the body of a reexported commit says it was made of.
+type Mark struct {
+	Upstream, Runtime string
+	ExtraData         []string // extradata.Marks
+}
+
+// Mark is what j's commit will say it was made of.
+func (j Job) Mark() Mark {
+	return Mark{Upstream: j.Upstream, Runtime: j.Runtime.Runtime.String(), ExtraData: extradata.Marks(j.ExtraData)}
+}
+
+// Equal reports whether two marks are the same.
+func (m Mark) Equal(o Mark) bool {
+	return m.Upstream == o.Upstream && m.Runtime == o.Runtime && slices.Equal(m.ExtraData, o.ExtraData)
+}
+
+// Body is the commit body of a reexport. Without extra-data it is what
+// rpak always wrote, so that exports of older rpaks look current.
+func Body(m Mark) string {
+	body := markUpstream + m.Upstream + "\n" + markRuntime + m.Runtime
+	for _, e := range m.ExtraData {
+		body += "\n" + markExtraData + e
+	}
+	return body
 }
 
 // ParseBody reads the marks of a reexported commit's body.
-func ParseBody(body string) (upstream, runtime string) {
+func ParseBody(body string) Mark {
+	var m Mark
 	for _, line := range strings.Split(body, "\n") {
 		if v, ok := strings.CutPrefix(line, markUpstream); ok {
-			upstream = v
+			m.Upstream = v
 		}
 		if v, ok := strings.CutPrefix(line, markRuntime); ok {
-			runtime = v
+			m.Runtime = v
+		}
+		if v, ok := strings.CutPrefix(line, markExtraData); ok {
+			m.ExtraData = append(m.ExtraData, v)
 		}
 	}
-	return upstream, runtime
+	sort.Strings(m.ExtraData)
+	return m
 }
 
-// Exported returns the upstream commit and runtime of the commit ref has in
-// the local repository; ok is false if it has none.
-func Exported(installation, ref string) (upstream, runtime string, ok bool) {
+// Exported returns the marks of the commit ref has in the local
+// repository; ok is false if it has none.
+func Exported(installation, ref string) (Mark, bool) {
 	repo := RepoPath(installation)
 	b, err := os.ReadFile(filepath.Join(repo, "refs", "heads", filepath.FromSlash(ref)))
 	if err != nil {
-		return "", "", false
+		return Mark{}, false
 	}
 	sum := strings.TrimSpace(string(b))
 	data, err := os.ReadFile(filepath.Join(repo, filepath.FromSlash(ostree.ObjectPath(sum, "commit"))))
 	if !ostree.ValidChecksum(sum) || err != nil {
-		return "", "", false
+		return Mark{}, false
 	}
 	c, err := ostree.ParseCommit(data)
 	if err != nil {
-		return "", "", false
+		return Mark{}, false
 	}
-	upstream, runtime = ParseBody(c.Body)
-	return upstream, runtime, upstream != ""
+	m := ParseBody(c.Body)
+	return m, m.Upstream != ""
 }
 
-// Export makes the local repository's ref the upstream commit with the
-// runtime of r: the commit is checked out from src, verified object by
-// object against upstream (a checksum flatpak got from the remote's signed
-// summary), its metadata rewritten, and the result committed with flatpak
-// build-export, which creates the repository (archive-z2) the first time
-// and makes xa.metadata and xa.extra-data-sources from the new metadata
-// (the extra-data themselves are unchanged). The summary is not updated:
-// call Publish once all refs are exported. ref is app/ID/ARCH/BRANCH.
-func Export(ctx context.Context, flatpak Runner, installation string, src ostree.Source, ref, upstream string, r Resolution) error {
+// Export makes the local repository's ref the upstream commit j.Upstream
+// with the runtime and the extra-data of j: the commit is checked out from
+// src, verified object by object against upstream (a checksum flatpak got
+// from the remote's signed summary), its metadata rewritten, and the
+// result committed with flatpak build-export, which creates the repository
+// (archive-z2) the first time and makes xa.metadata and
+// xa.extra-data-sources from the new metadata (so the extra-data are the
+// replaced ones, or upstream's). The summary is not updated: call Publish
+// once all refs are exported. j.Ref is app/ID/ARCH/BRANCH.
+func Export(ctx context.Context, flatpak Runner, installation string, src ostree.Source, j Job) error {
+	ref, upstream, r := j.Ref, j.Upstream, j.Runtime
 	parts := strings.Split(ref, "/")
 	if len(parts) != 4 || parts[0] != "app" {
 		return fmt.Errorf("%s is not an app ref", ref)
@@ -116,11 +158,18 @@ func Export(ctx context.Context, flatpak Runner, installation string, src ostree
 	if orig != r.Original {
 		return fmt.Errorf("upstream's %s is built for %s, not %s", upstream[:12], orig, r.Original)
 	}
+	out := string(text)
 	if r.Forced {
-		out, err := RewriteMetadata(string(text), r.Original, r.Runtime)
-		if err != nil {
+		if out, err = RewriteMetadata(out, r.Original, r.Runtime); err != nil {
 			return err
 		}
+	}
+	if len(j.ExtraData) > 0 {
+		if out, err = extradata.Rewrite(out, ref, j.ExtraData); err != nil {
+			return err
+		}
+	}
+	if out != string(text) {
 		if err := os.WriteFile(metaPath, []byte(out), 0o644); err != nil {
 			return err
 		}
@@ -141,16 +190,16 @@ func Export(ctx context.Context, flatpak Runner, installation string, src ostree
 			extra = append(extra, "--end-of-life-rebase="+p[1])
 		}
 	}
-	_, err = flatpak.Output(ctx, exportArgv(installation, ref, build, upstream, subject(commit.Subject, r), r, extra)...)
+	_, err = flatpak.Output(ctx, exportArgv(installation, build, subject(commit.Subject, j), j, extra)...)
 	return err
 }
 
 // exportArgv is the build-export command that exports the checkout build
-// of ref, made from the upstream commit, into the local repository.
-func exportArgv(installation, ref, build, upstream, subject string, r Resolution, extra []string) []string {
-	parts := strings.Split(ref, "/")
+// of j's ref, made from the upstream commit, into the local repository.
+func exportArgv(installation, build, subject string, j Job, extra []string) []string {
+	parts := strings.Split(j.Ref, "/")
 	argv := []string{"build-export", "--arch=" + parts[2], "--no-update-summary",
-		"--subject=" + subject, "--body=" + Body(upstream, r.Runtime)}
+		"--subject=" + subject, "--body=" + Body(j.Mark())}
 	argv = append(argv, extra...)
 	return append(argv, RepoPath(installation), build, parts[3])
 }
@@ -158,12 +207,12 @@ func exportArgv(installation, ref, build, upstream, subject string, r Resolution
 // ExportPreview is the build-export command Export would run, for a dry
 // run: without reading the commit, the checkout and the subject (and any
 // end of life) are placeholders.
-func ExportPreview(installation, ref, upstream string, r Resolution) []string {
-	short := upstream
+func ExportPreview(installation string, j Job) []string {
+	short := j.Upstream
 	if len(short) > 12 {
 		short = short[:12]
 	}
-	return exportArgv(installation, ref, "<checkout of "+short+">", upstream, subject("<upstream's subject>", r), r, nil)
+	return exportArgv(installation, "<checkout of "+short+">", subject("<upstream's subject>", j), j, nil)
 }
 
 // PublishArgv is the command Publish runs.
@@ -181,11 +230,18 @@ func RemoteAddArgv(installation string) []string {
 // configured.
 func RemoteDeleteArgv() []string { return []string{"remote-delete", "--user", RemoteName} }
 
-func subject(upstream string, r Resolution) string {
-	if r.Forced {
-		return fmt.Sprintf("%s (rpak: runtime %s)", upstream, r.Runtime)
+func subject(upstream string, j Job) string {
+	var what []string
+	if j.Runtime.Forced {
+		what = append(what, "runtime "+j.Runtime.Runtime.String())
 	}
-	return upstream
+	for _, e := range j.ExtraData {
+		what = append(what, "extra-data "+e.Name)
+	}
+	if len(what) == 0 {
+		return upstream
+	}
+	return fmt.Sprintf("%s (rpak: %s)", upstream, strings.Join(what, ", "))
 }
 
 // Publish updates the local repository's summary and drops every commit
@@ -295,11 +351,12 @@ const (
 )
 
 // DecideLocalCleanup decides about the local remote and repository after
-// records were removed: they go when the last reexport record went and no
-// installed ref has the remote as its origin any more. exists reports
+// records were removed: they go when the last reexport record went (a
+// force-runtime record of method reexport, or any extra-data record) and
+// no installed ref has the remote as its origin any more. exists reports
 // whether the remote or the repository is there at all.
-func DecideLocalCleanup(records []Record, users []string, exists bool) LocalCleanup {
-	if !exists {
+func DecideLocalCleanup(records []Record, extra []ExtraRecord, users []string, exists bool) LocalCleanup {
+	if !exists || len(extra) > 0 {
 		return KeepLocal
 	}
 	for _, r := range records {

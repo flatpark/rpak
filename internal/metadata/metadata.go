@@ -34,8 +34,31 @@ type Skipped struct {
 // Anything we cannot reproduce exactly is skipped: a wrong name or path only
 // means flatpak downloads the file itself.
 func Parse(text, ref string) ([]Source, []Skipped) {
+	entries, skipped := ParseEntries(text, ref)
+	sources := make([]Source, 0, len(entries))
+	for _, e := range entries {
+		sources = append(sources, e.Source)
+	}
+	if len(sources) == 0 {
+		sources = nil
+	}
+	return sources, skipped
+}
+
+// Entry is a source with where it is in the [Extra Data] group: the
+// suffix of its uri/name/checksum/size keys ("" for the first one, flatpak
+// build-finish numbers the others), and whether it has a name key of its
+// own or takes the name from the uri.
+type Entry struct {
+	Source
+	Suffix string
+	Named  bool
+}
+
+// ParseEntries is Parse with the entries' keys.
+func ParseEntries(text, ref string) ([]Entry, []Skipped) {
 	values, order := extraDataGroup(text)
-	var sources []Source
+	var entries []Entry
 	var skipped []Skipped
 	for _, key := range order {
 		if !strings.HasPrefix(key, "uri") {
@@ -48,9 +71,20 @@ func Parse(text, ref string) ([]Source, []Skipped) {
 			continue
 		}
 		source.Ref = ref
-		sources = append(sources, source)
+		_, named := values["name"+suffix]
+		entries = append(entries, Entry{Source: source, Suffix: suffix, Named: named})
 	}
-	return sources, skipped
+	return entries, skipped
+}
+
+// HasExtraData reports whether the metadata has an [Extra Data] group.
+func HasExtraData(text string) bool {
+	for _, g := range KeyFile(text) {
+		if g.Name == "Extra Data" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseSource(values map[string]string, suffix string) (Source, error) {
@@ -81,12 +115,17 @@ func parseSource(values map[string]string, suffix string) (Source, error) {
 			return Source{}, err
 		}
 	}
-	// The same checks flatpak_dir_pull_extra_data_to_bytes() applies before
-	// building <user dir>/extra-data/<sha256>/<name>.
-	if name == "" || name == "." || name == ".." || strings.Contains(name, "/") || strings.ContainsRune(name, 0) {
+	if !ValidName(name) {
 		return Source{}, fmt.Errorf("invalid name %q", name)
 	}
 	return Source{Name: name, Checksum: checksum, Size: size, URI: uri}, nil
+}
+
+// ValidName reports whether name can be an extra-data file name: the
+// checks flatpak_dir_pull_extra_data_to_bytes() applies before building
+// <user dir>/extra-data/<sha256>/<name>.
+func ValidName(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.Contains(name, "/") && !strings.ContainsRune(name, 0)
 }
 
 // basename mirrors g_file_get_basename (g_file_new_for_uri (uri)) for the
