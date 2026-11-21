@@ -226,3 +226,46 @@ func TestAssumeYes(t *testing.T) {
 		}
 	}
 }
+
+func TestForceRuntime(t *testing.T) {
+	argv := []string{"-y", "--force-runtime", "--arch", "x86_64", "flathub", "--force-runtime=26.08", "org.example.App", "--", "--force-runtime"}
+	p := Parse("install", argv)
+	if !p.ForceRuntime || p.ForceTarget != "26.08" || len(p.Unknown) != 0 {
+		t.Errorf("parsed %#v", p)
+	}
+	// The option never takes the next argument: flathub is the REMOTE.
+	if want := []string{"flathub", "org.example.App", "--force-runtime"}; !reflect.DeepEqual(p.Positionals, want) {
+		t.Errorf("positionals %q", p.Positionals)
+	}
+	want := []string{"-y", "--arch", "x86_64", "flathub", "org.example.App", "--", "--force-runtime"}
+	if got := StripForceRuntime(argv); !reflect.DeepEqual(got, want) {
+		t.Errorf("stripped %q, want %q", got, want)
+	}
+	// The input is not changed.
+	if argv[1] != "--force-runtime" {
+		t.Errorf("argv changed: %q", argv)
+	}
+	if got := Options("install", argv); !reflect.DeepEqual(got, []string{"-y", "--arch", "x86_64"}) {
+		t.Errorf("options %q", got)
+	}
+	p = Parse("update", []string{"--force-runtime", "org.example.App"})
+	if !p.ForceRuntime || p.ForceTarget != "" || !reflect.DeepEqual(p.Positionals, []string{"org.example.App"}) {
+		t.Errorf("update: %#v", p)
+	}
+	// Without it, nothing changes.
+	plain := []string{"--user", "-y", "flathub", "org.example.App"}
+	if got := StripForceRuntime(plain); !reflect.DeepEqual(got, plain) {
+		t.Errorf("stripped plain %q", got)
+	}
+	if p := Parse("install", plain); p.ForceRuntime {
+		t.Errorf("plain: %#v", p)
+	}
+}
+
+func TestOptions(t *testing.T) {
+	got := Options("update", []string{"--commit", "abc", "app", "-uy", "--subpath=/x", "--installation", "extra", "other"})
+	want := []string{"--commit", "abc", "-uy", "--subpath=/x", "--installation", "extra"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

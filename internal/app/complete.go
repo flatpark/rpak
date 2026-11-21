@@ -10,7 +10,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/flatpark/rpak/internal/args"
+	fr "github.com/flatpark/rpak/internal/forceruntime"
 	"github.com/flatpark/rpak/internal/installation"
+	"github.com/flatpark/rpak/internal/prefetch"
 )
 
 // `rpak complete LINE POINT CUR` speaks flatpak's completion protocol
@@ -225,8 +228,92 @@ func completeCommand(argv []string, stdout io.Writer) int {
 	case "doctor":
 		c.doctor(stdout, c.words[i+1:])
 		return 0
+	case "patch":
+		c.patch(stdout, c.words[i+1:])
+		return 0
+	case "install", "update", "upgrade":
+		return c.withForceRuntime(stdout)
 	}
 	return c.flatpak(stdout)
+}
+
+// withForceRuntime is flatpak's completion of install/update, plus rpak's
+// own --force-runtime when an option is being typed, and its values after
+// "--force-runtime=".
+func (c *completion) withForceRuntime(stdout io.Writer) int {
+	if prefix := args.ForceRuntimeOption + "="; strings.HasPrefix(c.cur, prefix) {
+		for _, v := range []string{"latest "} {
+			if word, ok := c.completeWord(prefix + v); ok {
+				fmt.Fprintln(stdout, word)
+			}
+		}
+		return 0
+	}
+	code := c.flatpak(stdout)
+	if strings.HasPrefix(c.cur, "--") {
+		for _, candidate := range []string{args.ForceRuntimeOption + " ", args.ForceRuntimeOption + "="} {
+			if word, ok := c.completeWord(candidate); ok {
+				fmt.Fprintln(stdout, word)
+			}
+		}
+	}
+	return code
+}
+
+// patch completes rpak patch: its options, the values of --reset= and
+// --force-runtime=, and app ids: those with a patch after --reset, the
+// apps installed in the user installation otherwise.
+func (c *completion) patch(stdout io.Writer, words []shellWord) {
+	emit := func(candidate string) {
+		if word, ok := c.completeWord(candidate); ok {
+			fmt.Fprintln(stdout, word)
+		}
+	}
+	values := map[string][]string{"--reset=": {fr.Kind + " "}, args.ForceRuntimeOption + "=": {fr.Latest + " "}}
+	for prefix, vs := range values {
+		if strings.HasPrefix(c.cur, prefix) {
+			for _, v := range vs {
+				emit(prefix + v)
+			}
+			return
+		}
+	}
+	if strings.HasPrefix(c.cur, "-") {
+		for _, o := range []string{"--list ", args.ForceRuntimeOption + " ", args.ForceRuntimeOption + "=", "--reset ", "--reset=",
+			"-y ", "--assumeyes ", "--noninteractive ", "--verbose ", "--help "} {
+			emit(o)
+		}
+		return
+	}
+	user, err := prefetch.DefaultUserBaseDir()
+	if err != nil {
+		return
+	}
+	reset := false
+	given := map[string]bool{}
+	for _, w := range words {
+		if name, _, _ := strings.Cut(w.text, "="); name == "--reset" {
+			reset = true
+		}
+		given[w.text] = true
+	}
+	var refs []string
+	if reset {
+		records, _ := fr.Load(user)
+		for _, r := range records {
+			refs = append(refs, r.Ref)
+		}
+	} else {
+		refs = fr.Installed(user, "app")
+	}
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		id := idOf(ref)
+		if !given[id] && !seen[id] {
+			seen[id] = true
+			emit(id + " ")
+		}
+	}
 }
 
 // flatpak forwards the completion to flatpak, with its output and exit
@@ -249,7 +336,7 @@ func (c *completion) flatpak(stdout io.Writer) int {
 }
 
 // ownCommands are the commands rpak adds to flatpak's.
-var ownCommands = []string{"clean", "completion", "doctor"}
+var ownCommands = []string{"clean", "completion", "doctor", "patch"}
 
 // commands completes the command name: flatpak's candidates (commands, or
 // global options for "-"), and rpak's own commands. If flatpak cannot be

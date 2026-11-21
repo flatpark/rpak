@@ -1,7 +1,8 @@
 # rpak
 
 rpak is a wrapper around flatpak. It aims to accept every flatpak command
-and option, and adds two things:
+and option, and adds two things (and an experimental third, see
+[patch](#patch-experimental)):
 
 - **Parallel downloads.** `install` and `update` download the installers
   of extra-data apps (most proprietary apps on FlatPark) several at a time;
@@ -107,6 +108,82 @@ User installation
   extra-data chrome.deb  https://dl.google.com/...  HTTP 200, 147.5 MB (pinned 147.5 MB)  (installed and remote commit)
 ...
 ```
+
+### patch (experimental)
+
+```
+rpak install --force-runtime[=TARGET] [--user] [OPTION]... REMOTE APP...
+rpak update --force-runtime[=TARGET] [OPTION]... APP...
+rpak patch --force-runtime[=TARGET] [-y] APP...
+rpak patch [--list]
+rpak patch --reset[=PATCH] [-y] APP...
+```
+
+**Experimental.** `--force-runtime` makes apps run on a newer branch of
+their runtime than the one they were built for, without waiting for
+upstream: an app on Flathub still built for
+`org.freedesktop.Platform//25.08` runs on `26.08`. The old runtime is then
+not downloaded, and `flatpak uninstall --unused` can remove it; before a
+major runtime upgrade you can try out how your apps do on the new one. The
+apps have not been tested on that runtime and may break; rpak checks
+nothing about compatibility. Every time it forces an app it says so:
+
+```
+rpak: experimental: com.example.App was built for org.freedesktop.Platform/x86_64/25.08, now runs on org.freedesktop.Platform/x86_64/26.08; it may break. Undo: rpak patch --reset com.example.App
+```
+
+- `rpak install --force-runtime REMOTE APP...` installs apps forced;
+- `rpak patch --force-runtime APP...` forces apps that are installed, at the
+  version they are;
+- `rpak update --force-runtime APP...` updates apps and forces them.
+
+`TARGET` is `latest` (the default: the newest branch of the same form,
+`YY.MM`, `N` or KDE's `5.15-YY.MM`, found in the remotes and the installed
+runtimes; KDE 5.15 never moves to 6), a branch (`26.08`), or a whole
+runtime `ID/ARCH/BRANCH`, which may name another runtime (your call). An
+app is only ever moved up: if upstream is already on the target or past
+it, nothing is forced. Giving `--force-runtime=TARGET` again for a patched
+app changes its target.
+
+rpak remembers what it patched (`rpak patch` lists it, from
+`<user installation>/rpak/patches.json`); later `rpak update` and
+`rpak install` keep it, with or without APP arguments. `rpak patch --reset
+APP` undoes an app's patches (`--reset=force-runtime` just that one; it is
+the only kind so far): rpak forgets them and reinstalls the app from its
+remote as it was built, with its runtime. Only the user installation is
+supported.
+
+How it works: flatpak runs an app on the runtime its deployed `metadata`
+names. For most apps rpak installs them with `--no-deps` and rewrites the
+deployed `metadata` (and the runtime in the deployment's `deploy` file)
+after flatpak deployed them (method *patch*); runtimes the apps then need
+are installed afterwards. Apps with extra-data run their installer script
+in the runtime while being deployed, so rpak downloads upstream's commit
+itself, checks every object against the checksum the remote's signed
+summary gives, changes the runtime in its metadata and exports it into a
+local repository, `<user installation>/rpak/local-repo`, which flatpak
+installs the app from (method *reexport*, remote `rpak-local`, added when
+first needed and removed with the last such app). The data in `~/.var/app`
+stays where it is.
+
+Things to know:
+
+- `flatpak update` without rpak deploys a patched app as upstream built it:
+  it pulls the old runtime and runs on it, as before. The next `rpak
+  update` forces it again. A reexported app gets no updates from flatpak
+  alone (its remote is rpak's); `rpak update` checks upstream and exports
+  anew. `rpak doctor` shows how each patched app stands.
+- An app uninstalled with flatpak is forgotten by the next rpak command.
+- When `rpak update` updates both installations and an app of the user
+  installation is patched, flatpak runs twice, once per installation, so
+  that `--no-deps` stays in the user installation: you may be asked twice.
+- Extensions of the app that follow the runtime's version (codecs, GL)
+  are named in the new version, but only the runtime is installed for you.
+- Reexporting needs upstream to serve loose objects over http(s) or
+  `file:` (Flathub and FlatPark do); a repository that only offers static
+  deltas is refused, and `rpak patch` needs upstream to still have the
+  installed commit. The Locale and Debug extensions of a reexported app
+  are not reexported and so not installed.
 
 ### Environment
 

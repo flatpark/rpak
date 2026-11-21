@@ -369,6 +369,299 @@ line="rpak doctor com.ferris"
 [ "$(rpak complete "$line" "${#line}" com.ferris)" = "com.ferrispad.FerrisPad " ] || fail "rpak doctor com.ferris<TAB>"
 pass "rpak doctor completes the installed apps"
 
+step "force-runtime: an upstream repository served over http"
+# Two apps made here, without an SDK, built for a branch of the runtime
+# below $RUNTIME_BRANCH that is nowhere in the container: forcing them is
+# the only way they can run. The repository and the extra-data come from
+# python's http server, so rpak fetches the objects over http.
+old=$(awk -F. -v b="$RUNTIME_BRANCH" 'BEGIN { split(b, v, "."); printf "%d.%s", v[1] - 1, v[2] }')
+! flatpak info "$RUNTIME/$arch/$old" >/dev/null 2>&1 || fail "$RUNTIME//$old is installed in the container"
+www=/tmp/fr-www
+up=$www/repo
+port=8765
+url=http://127.0.0.1:$port
+export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost
+mkdir -p "$www"
+python3 -m http.server --bind 127.0.0.1 --directory "$www" "$port" >/tmp/http.log 2>&1 &
+http_pid=$!
+for _ in $(seq 50); do
+	python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1])' "$url/" 2>/dev/null && break
+	sleep 0.1
+done
+fr_app() { # id version command, then extra metadata lines
+	local id=$1 version=$2 command=$3 dir=/tmp/fr-$1-$2
+	shift 3
+	rm -rf "$dir"
+	mkdir -p "$dir/files/bin" "$dir/export"
+	{
+		printf '[Application]\nname=%s\nruntime=%s/%s/%s\nsdk=org.freedesktop.Sdk/%s/%s\ncommand=%s\n' \
+			"$id" "$RUNTIME" "$arch" "$old" "$arch" "$old" "$command"
+		printf '%s\n' "$@"
+	} > "$dir/metadata"
+	echo "$dir"
+}
+publish_plain() { # version
+	local dir
+	dir=$(fr_app org.rpak.test.Plain "$1" plain)
+	printf '#!/bin/sh\necho "rpak plain %s"\n' "$1" > "$dir/files/bin/plain"
+	chmod +x "$dir/files/bin/plain"
+	flatpak build-export --arch="$arch" "$up" "$dir" stable >/dev/null
+}
+publish_extra() { # version
+	local dir payload=$www/payload-$1.txt
+	echo "payload $1" > "$payload"
+	dir=$(fr_app org.rpak.test.Extra "$1" extra '' '[Extra Data]' name=payload.txt \
+		"checksum=$(sha256sum "$payload" | cut -d' ' -f1)" "size=$(stat -c %s "$payload")" "uri=$url/payload-$1.txt")
+	# Run by the runtime's /bin/sh while deploying: proves which runtime.
+	printf '#!/bin/sh\nset -e\ntr a-z A-Z < payload.txt > marker\nrm payload.txt\n. /usr/lib/os-release && echo "$VERSION_ID" > runtime-version\n' > "$dir/files/bin/apply_extra"
+	printf '#!/bin/sh\ncat /app/extra/marker /app/extra/runtime-version\n' > "$dir/files/bin/extra"
+	chmod +x "$dir/files/bin/apply_extra" "$dir/files/bin/extra"
+	flatpak build-export --arch="$arch" "$up" "$dir" stable >/dev/null
+}
+publish_plain 1
+publish_extra 1
+flatpak remote-add --user --no-gpg-verify upstream "$url/repo"
+flatpak remote-info --user upstream org.rpak.test.Extra | grep -E 'Runtime|Commit'
+pass "upstream serves org.rpak.test.Plain and org.rpak.test.Extra, built for $RUNTIME//$old"
+
+step "force-runtime: plain flatpak cannot deploy the extra-data app without its runtime"
+code=0
+flatpak install --user -y --noninteractive --no-deps upstream org.rpak.test.Extra > /tmp/fr-plain.log 2>&1 || code=$?
+tail -3 /tmp/fr-plain.log
+[ "$code" -ne 0 ] || fail "flatpak installed org.rpak.test.Extra without $RUNTIME//$old"
+! flatpak info --user org.rpak.test.Extra >/dev/null 2>&1 || fail "org.rpak.test.Extra is installed"
+pass "apply_extra needs the runtime of the metadata: flatpak install --no-deps failed (exit $code)"
+
+step "rpak install -y --force-runtime=$RUNTIME_BRANCH upstream org.rpak.test.Plain org.rpak.test.Extra"
+code=0
+rpak install -y --force-runtime="$RUNTIME_BRANCH" upstream org.rpak.test.Plain org.rpak.test.Extra > /tmp/fr-install.log 2>&1 || code=$?
+cp /tmp/fr-install.log /out/force-install.log
+grep -E '^rpak' /tmp/fr-install.log
+[ "$code" -eq 0 ] || { cat /tmp/fr-install.log; fail "rpak install --force-runtime exited $code"; }
+
+step "checks: force-runtime install"
+forced=$RUNTIME/$arch/$RUNTIME_BRANCH
+for app in org.rpak.test.Plain org.rpak.test.Extra; do
+	rt=$(flatpak info --user "$app" | sed -n 's/^ *Runtime: //p')
+	[ "$rt" = "$forced" ] || fail "$app: flatpak info says runtime $rt"
+	grep -qxF "rpak: experimental: $app was built for $RUNTIME/$arch/$old, now runs on $forced; it may break. Undo: rpak patch --reset $app" /tmp/fr-install.log ||
+		fail "no experimental warning for $app"
+done
+pass "flatpak info: both run on $forced; the experimental warning was printed for both"
+[ -z "$(flatpak list --user --runtime --columns=ref)" ] || fail "runtimes pulled into the user installation: $(flatpak list --user --runtime --columns=ref)"
+! ls "$repo/refs/remotes/"*/runtime 2>/dev/null | grep -q . || fail "runtime refs pulled: $(ls -R "$repo/refs/remotes/"*/runtime)"
+pass "no runtime was pulled into the user installation"
+[ "$(flatpak run --user org.rpak.test.Plain)" = "rpak plain 1" ] || fail "org.rpak.test.Plain: $(flatpak run --user org.rpak.test.Plain 2>&1)"
+pass "org.rpak.test.Plain runs: rpak plain 1"
+extradir=$FLATPAK_USER_DIR/app/org.rpak.test.Extra/$arch/stable/active/files/extra
+[ "$(cat "$extradir/marker")" = "PAYLOAD 1" ] || fail "marker: $(cat "$extradir/marker" 2>&1)"
+[ "$(cat "$extradir/runtime-version")" = "$RUNTIME_BRANCH" ] || fail "apply_extra ran in runtime $(cat "$extradir/runtime-version" 2>&1)"
+[ "$(flatpak run --user org.rpak.test.Extra | sed -n 1p)" = "PAYLOAD 1" ] || fail "org.rpak.test.Extra does not run"
+pass "apply_extra of org.rpak.test.Extra ran in the $RUNTIME_BRANCH runtime; the app runs"
+[ "$(flatpak info --user --show-origin org.rpak.test.Extra)" = rpak-local ] || fail "origin of org.rpak.test.Extra: $(flatpak info --user --show-origin org.rpak.test.Extra)"
+[ "$(flatpak info --user --show-origin org.rpak.test.Plain)" = upstream ] || fail "origin of org.rpak.test.Plain"
+flatpak remotes --user --columns=name,url,options | grep '^rpak-local' || fail "no remote rpak-local"
+pass "org.rpak.test.Extra comes from the remote rpak-local (exists before any reset), org.rpak.test.Plain from upstream"
+plainmeta=$FLATPAK_USER_DIR/app/org.rpak.test.Plain/$arch/stable/active/metadata
+[ "$(stat -c %h "$plainmeta")" = 1 ] || fail "the deployment's metadata still has $(stat -c %h "$plainmeta") links"
+pcommit=$(flatpak info --user --show-commit org.rpak.test.Plain)
+ostree --repo="$repo" cat "$pcommit" /metadata | grep -qx "runtime=$RUNTIME/$arch/$old" || fail "the repository's metadata changed"
+ostree --repo="$repo" fsck > /tmp/fsck.log 2>&1 || { cat /tmp/fsck.log; fail "ostree fsck"; }
+pass "the patched metadata is a file of its own; the repository object still says $old and ostree fsck passes"
+grep -qx "runtime=$forced" "$plainmeta" || fail "deployment metadata"
+grep -qx "sdk=org.freedesktop.Sdk/$arch/$RUNTIME_BRANCH" "$plainmeta" || fail "sdk not moved along"
+pass "the deployment's metadata names runtime and sdk $RUNTIME_BRANCH"
+
+step "force-runtime: rpak update -y after a new upstream commit"
+publish_plain 2
+publish_extra 2
+code=0
+rpak update -y > /tmp/fr-update.log 2>&1 || code=$?
+cp /tmp/fr-update.log /out/force-update.log
+grep -E '^rpak' /tmp/fr-update.log
+[ "$code" -eq 0 ] || { cat /tmp/fr-update.log; fail "rpak update exited $code"; }
+[ "$(flatpak run --user org.rpak.test.Plain)" = "rpak plain 2" ] || fail "org.rpak.test.Plain not updated: $(flatpak run --user org.rpak.test.Plain 2>&1)"
+[ "$(cat "$extradir/marker")" = "PAYLOAD 2" ] || fail "org.rpak.test.Extra not updated: $(cat "$extradir/marker")"
+for app in org.rpak.test.Plain org.rpak.test.Extra; do
+	rt=$(flatpak info --user "$app" | sed -n 's/^ *Runtime: //p')
+	[ "$rt" = "$forced" ] || fail "$app runs on $rt after the update"
+done
+[ -z "$(flatpak list --user --runtime --columns=ref)" ] || fail "runtimes pulled by the update"
+pass "both updated to their new commits and still run on $RUNTIME_BRANCH"
+
+step "rpak patch (the list)"
+rpak patch | tee /tmp/fr-list.log
+for app in org.rpak.test.Plain org.rpak.test.Extra; do
+	grep -E "^$app/$arch/stable +force-runtime +$RUNTIME/$arch/$old +$forced +(patch|reexport) +upstream +$RUNTIME_BRANCH\$" /tmp/fr-list.log >/dev/null || fail "list: no line for $app"
+done
+grep -q "^org.rpak.test.Plain/.* patch " /tmp/fr-list.log && grep -q "^org.rpak.test.Extra/.* reexport " /tmp/fr-list.log || fail "list: methods"
+[ -f "$FLATPAK_USER_DIR/rpak/patches.json" ] || fail "no patches.json"
+pass "rpak patch lists both, methods patch and reexport"
+
+step "force-runtime: rpak doctor"
+code=0
+rpak doctor org.rpak.test.Plain org.rpak.test.Extra > /tmp/fr-doctor.log 2>&1 || code=$?
+sed -n '/^== Patches/,/^== /p' /tmp/fr-doctor.log
+[ "$code" -eq 0 ] || fail "rpak doctor exited $code"
+grep -qx "== Patches" /tmp/fr-doctor.log || fail "no Patches section"
+grep -q "org.rpak.test.Plain.*force-runtime (method patch).*deployment runs on $forced" /tmp/fr-doctor.log || fail "doctor: patch state of org.rpak.test.Plain"
+grep -q "installed from rpak-local: app/org.rpak.test.Extra/$arch/stable" /tmp/fr-doctor.log || fail "doctor: apps from rpak-local"
+grep -E "^  forced runtime: " /tmp/fr-doctor.log || fail "doctor: no forced runtime line in the app sections"
+grep -E "^  extra-data payload.txt .*\(upstream remote upstream" /tmp/fr-doctor.log || fail "doctor: the extra-data check of org.rpak.test.Extra is not against upstream"
+pass "rpak doctor: the Patches section, the apps marked as forced, extra-data checked upstream"
+
+step "force-runtime: flatpak update outside rpak, flatpak repair, uninstall --unused"
+publish_plain 3
+# flatpak deploys upstream's metadata again; without --no-deps it would
+# pull $RUNTIME//$old, which this container does not have anywhere.
+flatpak update --user -y --noninteractive --no-deps org.rpak.test.Plain >/dev/null
+rt=$(flatpak info --user org.rpak.test.Plain | sed -n 's/^ *Runtime: //p')
+[ "$rt" = "$RUNTIME/$arch/$old" ] || fail "after flatpak update: runtime $rt"
+rpak doctor org.rpak.test.Plain > /tmp/fr-doctor.log 2>&1
+grep "org.rpak.test.Plain" /tmp/fr-doctor.log | grep -q "not forced now" || { sed -n '/^== Patches/,/^== /p' /tmp/fr-doctor.log; fail "doctor does not see the restored metadata"; }
+pass "flatpak update put back upstream's runtime; rpak doctor reports it"
+rpak update -y > /tmp/fr-update.log 2>&1 || { cat /tmp/fr-update.log; fail "rpak update"; }
+grep '^rpak' /tmp/fr-update.log
+[ "$(flatpak run --user org.rpak.test.Plain)" = "rpak plain 3" ] || fail "org.rpak.test.Plain after rpak update"
+rt=$(flatpak info --user org.rpak.test.Plain | sed -n 's/^ *Runtime: //p')
+[ "$rt" = "$forced" ] || fail "rpak update did not force it again: $rt"
+pass "the next rpak update forced it again"
+flatpak repair --user > /tmp/repair.log 2>&1 || { cat /tmp/repair.log; fail "flatpak repair failed"; }
+tail -2 /tmp/repair.log
+flatpak uninstall --user -y --noninteractive --unused > /tmp/unused.log 2>&1 || { cat /tmp/unused.log; fail "uninstall --unused"; }
+for app in org.rpak.test.Plain org.rpak.test.Extra; do
+	flatpak info --user "$app" >/dev/null || fail "$app is gone"
+	rt=$(flatpak info --user "$app" | sed -n 's/^ *Runtime: //p')
+	[ "$rt" = "$forced" ] || fail "$app runs on $rt after repair"
+done
+[ "$(flatpak run --user org.rpak.test.Plain)" = "rpak plain 3" ] || fail "org.rpak.test.Plain does not run after repair"
+[ "$(flatpak run --user org.rpak.test.Extra | sed -n 1p)" = "PAYLOAD 2" ] || fail "org.rpak.test.Extra does not run after repair"
+pass "flatpak repair --user and uninstall --unused leave both forced and running"
+
+step "force-runtime: an app uninstalled with flatpak is forgotten"
+flatpak uninstall --user -y --noninteractive org.rpak.test.Plain >/dev/null 2>&1
+rpak patch | tee /tmp/fr-list.log
+! grep -q org.rpak.test.Plain /tmp/fr-list.log || fail "the record of the uninstalled app is still listed"
+grep -q org.rpak.test.Extra /tmp/fr-list.log || fail "org.rpak.test.Extra is not listed"
+pass "the record of org.rpak.test.Plain is gone, org.rpak.test.Extra's kept"
+
+step "rpak patch --force-runtime on an app installed by flatpak, then rpak update"
+# Without the extra-data, flatpak can deploy it without its runtime.
+flatpak install --user -y --noninteractive --no-deps upstream org.rpak.test.Plain >/dev/null 2>&1
+rt=$(flatpak info --user org.rpak.test.Plain | sed -n 's/^ *Runtime: //p')
+[ "$rt" = "$RUNTIME/$arch/$old" ] || fail "installed by flatpak: runtime $rt"
+publish_plain 4
+state > /tmp/state.before
+RPAK_DRY_RUN=1 rpak patch -y --force-runtime="$RUNTIME_BRANCH" org.rpak.test.Plain > /tmp/fr-dry.log 2>&1 || { cat /tmp/fr-dry.log; fail "rpak patch --force-runtime, dry run"; }
+cat /tmp/fr-dry.log
+state > /tmp/state.after
+diff /tmp/state.before /tmp/state.after || fail "the dry run of rpak patch changed files"
+grep -q "^rpak: dry run, would rewrite metadata and deploy of org.rpak.test.Plain (.*): runtime $RUNTIME/$arch/$old -> $forced\$" /tmp/fr-dry.log || fail "dry run: no rewrite line"
+grep -q "^rpak: dry run, would record org.rpak.test.Plain in .*/patches.json: force-runtime, target $RUNTIME_BRANCH, method patch, $RUNTIME/$arch/$old -> $forced\$" /tmp/fr-dry.log || fail "dry run: no record line"
+! grep -q experimental /tmp/fr-dry.log || fail "the dry run announced"
+pass "RPAK_DRY_RUN=1 rpak patch --force-runtime says what it would record and rewrite, and changes nothing"
+rpak patch -y --force-runtime="$RUNTIME_BRANCH" org.rpak.test.Plain > /tmp/fr-patch.log 2>&1 || { cat /tmp/fr-patch.log; fail "rpak patch --force-runtime"; }
+grep '^rpak' /tmp/fr-patch.log
+rt=$(flatpak info --user org.rpak.test.Plain | sed -n 's/^ *Runtime: //p')
+[ "$rt" = "$forced" ] || fail "rpak patch --force-runtime: runtime $rt"
+[ "$(flatpak run --user org.rpak.test.Plain)" = "rpak plain 3" ] || fail "rpak patch changed the version: $(flatpak run --user org.rpak.test.Plain 2>&1)"
+pass "rpak patch --force-runtime=$RUNTIME_BRANCH forced the installed org.rpak.test.Plain, still version 3"
+rpak patch -y --force-runtime="$RUNTIME_BRANCH" org.rpak.test.Plain > /tmp/fr-patch.log 2>&1 || { cat /tmp/fr-patch.log; fail "rpak patch --force-runtime again"; }
+! grep -q experimental /tmp/fr-patch.log || fail "the same patch again announced: $(cat /tmp/fr-patch.log)"
+pass "the same rpak patch again prints no experimental line"
+rpak update -y --force-runtime="$RUNTIME_BRANCH" org.rpak.test.Plain > /tmp/fr-update.log 2>&1 || { cat /tmp/fr-update.log; fail "rpak update --force-runtime"; }
+rt=$(flatpak info --user org.rpak.test.Plain | sed -n 's/^ *Runtime: //p')
+[ "$rt" = "$forced" ] || fail "rpak update --force-runtime: runtime $rt"
+[ "$(flatpak run --user org.rpak.test.Plain)" = "rpak plain 4" ] || fail "not updated: $(flatpak run --user org.rpak.test.Plain 2>&1)"
+pass "rpak update --force-runtime updated it to version 4, still forced"
+
+step "force-runtime: the remote rpak-local and its repository deleted by hand"
+flatpak remote-delete --user --force rpak-local >/dev/null
+rm -rf "$FLATPAK_USER_DIR/rpak/local-repo"
+publish_extra 3
+rpak update -y > /tmp/fr-update.log 2>&1 || { cat /tmp/fr-update.log; fail "rpak update without rpak-local"; }
+grep '^rpak' /tmp/fr-update.log
+flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local was not added again"
+[ "$(cat "$extradir/marker")" = "PAYLOAD 3" ] || fail "org.rpak.test.Extra not updated: $(cat "$extradir/marker")"
+rt=$(flatpak info --user org.rpak.test.Extra | sed -n 's/^ *Runtime: //p')
+[ "$rt" = "$forced" ] || fail "org.rpak.test.Extra runs on $rt"
+pass "rpak update made the repository and the remote again, and updated org.rpak.test.Extra"
+
+step "rpak patch --force-runtime (latest) on an extra-data app installed by flatpak"
+# A runtime of busybox alone, org.rpak.test.Platform, branches 1 and 2,
+# in upstream: enough for an apply_extra script, so that flatpak itself
+# can install an extra-data app first.
+publish_runtime() { # branch
+	local dir=/tmp/fr-runtime-$1
+	rm -rf "$dir"
+	# build-export --runtime commits usr/ (it becomes the files of the
+	# runtime, /usr in the sandbox), but wants files/ to exist.
+	mkdir -p "$dir/usr/bin" "$dir/usr/lib" "$dir/files"
+	cp /bin/busybox "$dir/usr/bin/"
+	for applet in sh tr rm cat; do ln -s busybox "$dir/usr/bin/$applet"; done
+	echo "VERSION_ID=$1" > "$dir/usr/lib/os-release"
+	printf '[Runtime]\nname=org.rpak.test.Platform\n' > "$dir/metadata"
+	flatpak build-export --runtime --arch="$arch" "$up" "$dir" "$1" >/dev/null
+}
+publish_extra2() { # version
+	local dir payload=$www/payload2-$1.txt
+	echo "second $1" > "$payload"
+	dir=/tmp/fr-extra2-$1
+	rm -rf "$dir"
+	mkdir -p "$dir/files/bin" "$dir/export"
+	printf '[Application]\nname=org.rpak.test.Extra2\nruntime=org.rpak.test.Platform/%s/1\ncommand=apply_extra\n\n[Extra Data]\nname=payload.txt\nchecksum=%s\nsize=%s\nuri=%s\n' \
+		"$arch" "$(sha256sum "$payload" | cut -d' ' -f1)" "$(stat -c %s "$payload")" "$url/payload2-$1.txt" > "$dir/metadata"
+	printf '#!/bin/sh\nset -e\ntr a-z A-Z < payload.txt > marker\nrm payload.txt\n. /usr/lib/os-release && echo "$VERSION_ID" > runtime-version\n' > "$dir/files/bin/apply_extra"
+	chmod +x "$dir/files/bin/apply_extra"
+	flatpak build-export --arch="$arch" "$up" "$dir" stable >/dev/null
+}
+publish_runtime 1
+publish_runtime 2
+publish_extra2 1
+flatpak install --user -y --noninteractive upstream org.rpak.test.Extra2 >/dev/null 2>&1 || fail "flatpak install org.rpak.test.Extra2"
+extra2=$FLATPAK_USER_DIR/app/org.rpak.test.Extra2/$arch/stable/active/files/extra
+[ "$(cat "$extra2/runtime-version")" = 1 ] || fail "apply_extra of org.rpak.test.Extra2 ran in $(cat "$extra2/runtime-version")"
+publish_extra2 2
+rpak patch -y --force-runtime org.rpak.test.Extra2 > /tmp/fr-patch.log 2>&1 || { cat /tmp/fr-patch.log; fail "rpak patch --force-runtime org.rpak.test.Extra2"; }
+grep '^rpak' /tmp/fr-patch.log
+grep -qxF "rpak: experimental: org.rpak.test.Extra2 was built for org.rpak.test.Platform/$arch/1, now runs on org.rpak.test.Platform/$arch/2; it may break. Undo: rpak patch --reset org.rpak.test.Extra2" /tmp/fr-patch.log ||
+	fail "no experimental warning"
+[ "$(flatpak info --user --show-origin org.rpak.test.Extra2)" = rpak-local ] || fail "origin $(flatpak info --user --show-origin org.rpak.test.Extra2)"
+[ "$(cat "$extra2/runtime-version")" = 2 ] || fail "apply_extra ran in $(cat "$extra2/runtime-version")"
+[ "$(cat "$extra2/marker")" = "SECOND 1" ] || fail "rpak patch changed the version: $(cat "$extra2/marker")"
+pass "latest found branch 2 in upstream's summary; org.rpak.test.Extra2 moved to rpak-local, apply_extra ran in branch 2, still version 1"
+
+step "rpak patch --reset: the last reexported app"
+# org.rpak.test.Extra cannot be reset here (its runtime is nowhere), so it
+# goes the way users may go: uninstalled with flatpak, forgotten by rpak.
+flatpak uninstall --user -y --noninteractive org.rpak.test.Extra >/dev/null 2>&1
+rpak patch > /tmp/fr-list.log
+! grep -q '^org.rpak.test.Extra/' /tmp/fr-list.log || fail "org.rpak.test.Extra is still listed"
+flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local went while org.rpak.test.Extra2 comes from it"
+state > /tmp/state.before
+RPAK_DRY_RUN=1 rpak patch --reset -y org.rpak.test.Extra2 > /tmp/fr-dry.log 2>&1 || { cat /tmp/fr-dry.log; fail "rpak patch --reset, dry run"; }
+cat /tmp/fr-dry.log
+state > /tmp/state.after
+diff /tmp/state.before /tmp/state.after || fail "the dry run of rpak patch --reset changed files"
+grep -q "^rpak: dry run, would run: .*flatpak install --user --reinstall -y upstream app/org.rpak.test.Extra2/$arch/stable\$" /tmp/fr-dry.log || fail "dry run: no reinstall"
+grep -q "^rpak: dry run, would forget the force-runtime patch of org.rpak.test.Extra2 " /tmp/fr-dry.log || fail "dry run: no forget line"
+grep -q "^rpak: dry run, would run: .*flatpak remote-delete --user rpak-local\$" /tmp/fr-dry.log || fail "dry run: no remote-delete"
+flatpak remotes --user --columns=name | grep -qx rpak-local || fail "the dry run removed rpak-local"
+pass "RPAK_DRY_RUN=1 rpak patch --reset shows the reinstall, the forgotten patch and the removal of rpak-local, and changes nothing"
+rpak patch --reset -y org.rpak.test.Extra2 > /tmp/fr-reset.log 2>&1 || { cat /tmp/fr-reset.log; fail "rpak patch --reset"; }
+grep '^rpak' /tmp/fr-reset.log
+[ "$(flatpak info --user --show-origin org.rpak.test.Extra2)" = upstream ] || fail "origin after reset: $(flatpak info --user --show-origin org.rpak.test.Extra2)"
+[ "$(cat "$extra2/runtime-version")" = 1 ] || fail "after reset apply_extra ran in $(cat "$extra2/runtime-version")"
+[ "$(cat "$extra2/marker")" = "SECOND 2" ] || fail "after reset: $(cat "$extra2/marker")"
+! flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local is still there"
+[ ! -e "$FLATPAK_USER_DIR/rpak/local-repo" ] || fail "local-repo is still there"
+rpak patch | tee /tmp/fr-list.log
+! grep -q 'org.rpak.test.Extra2' /tmp/fr-list.log || fail "org.rpak.test.Extra2 is still listed"
+pass "reset reinstalled org.rpak.test.Extra2 from upstream on branch 1; rpak-local and local-repo are gone"
+
+kill "$http_pid" 2>/dev/null || true
+unset no_proxy NO_PROXY
+
 step "final checks"
 flatpak repair --user > /tmp/repair.log 2>&1 || { cat /tmp/repair.log; fail "flatpak repair failed"; }
 pass "flatpak repair --user"

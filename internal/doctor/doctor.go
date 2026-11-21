@@ -145,6 +145,8 @@ type doctor struct {
 	// flatpak is false when flatpak is missing or is rpak: nothing is run.
 	flatpak bool
 	cache   summaries
+	// force is what rpak force-runtime did in the user installation.
+	force *forcedInfo
 }
 
 func (d *doctor) getenv(name string) string {
@@ -213,6 +215,7 @@ func Run(ctx context.Context, cfg Config) Report {
 		func() { system = d.systemInfo() },
 		func() {
 			insts = d.installations()
+			d.force = d.forced()
 			parallel(
 				func() { network = d.network(insts) },
 				func() { extra = d.extraData(insts) },
@@ -222,14 +225,17 @@ func Run(ctx context.Context, cfg Config) Report {
 		func() { ps = d.ps() },
 	)
 
-	return Report{Sections: []Section{
+	sections := []Section{
 		d.basicsSection(basics, release),
 		d.envSection(),
 		d.systemSection(system, insts),
 		d.installationsSection(insts),
-		d.extraDataSection(extra),
-		d.networkSection(network),
-	}}.withApps(d, apps, insts, ps)
+	}
+	if s, ok := d.forcedSection(d.force, hasLocalRemote(insts)); ok {
+		sections = append(sections, s)
+	}
+	sections = append(sections, d.extraDataSection(extra), d.networkSection(network))
+	return Report{Sections: sections}.withApps(d, apps, insts, ps)
 }
 
 func (r Report) withApps(d *doctor, apps []*appInfo, insts []*instInfo, ps psInfo) Report {

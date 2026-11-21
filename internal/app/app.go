@@ -32,6 +32,8 @@ Commands:
              (see "rpak doctor --help")
   completion print the completion script for bash, zsh or fish
              (see "rpak completion --help" for how to install it)
+  patch      list, make or undo changes to installed apps (experimental,
+             see below and "rpak patch --help")
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
 
 On a terminal and without -y, flatpak starts at once and asks while rpak
@@ -40,6 +42,14 @@ prefetches; a "yes" reaches it when the prefetch is done.
 After a successful install or update (without --no-deploy), rpak removes
 the copies of the extra-data installers that flatpak keeps in the
 repositories involved.
+
+Experimental: install, update and patch take --force-runtime[=TARGET],
+which makes the apps run on a newer branch of their runtime than they were
+built for (TARGET: latest, the default, a branch such as 26.08, or a
+runtime ID/ARCH/BRANCH); the user installation only, install needs the
+REMOTE, update and patch the apps. Later installs and updates keep it. The
+apps were not tested on that runtime and may break; "rpak patch --reset
+APP" undoes it, "rpak patch" lists what is patched.
 
 Options:
   -h, --help     show this help
@@ -131,9 +141,19 @@ func run(version string, argv []string) int {
 		return completionCommand(argv[i+1:], os.Stdout, os.Stderr)
 	case "doctor":
 		return doctorCommand(version, argv[i+1:], os.Stdout, os.Stderr)
+	case "patch":
+		return patchCommand(version, argv[:i], argv[i+1:], os.Stdout, os.Stderr)
 	default:
 		return passthrough(argv)
 	}
+	return transaction(version, kind, argv, i)
+}
+
+// runFlatpak runs one flatpak update/install: argv is flatpak's whole
+// command line, argv[i] the command, kind "update" or "install". It
+// prefetches, runs flatpak, removes what it prefetched and frees the
+// extra-data flatpak cached, and returns flatpak's exit code.
+func runFlatpak(version, kind string, argv []string, i int) int {
 	flatpakArgs := argv[i+1:]
 	flatpak := flatpakPath()
 
