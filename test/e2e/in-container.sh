@@ -45,6 +45,16 @@ PY
 	lock_pid=$!
 	while [ ! -e /tmp/lock-ready ]; do sleep 0.1; done
 }
+# Whether someone holds a lock on $1 that a write lock would conflict with,
+# as flatpak tests files/.ref of a deployment.
+ref_locked() {
+	python3 - "$1" <<'PY'
+import fcntl, os, struct, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+r = fcntl.fcntl(fd, fcntl.F_GETLK, struct.pack("hhqqi4x", fcntl.F_WRLCK, 0, 0, 0, 0))
+sys.exit(0 if struct.unpack("hhqqi4x", r)[0] != fcntl.F_UNLCK else 1)
+PY
+}
 
 step "remotes"
 # No flathub: the runtime has to come from the system installation.
@@ -288,6 +298,15 @@ old=$(flatpak info --user --show-commit org.rpak.E2E)
 echo "installed v1 (plain flatpak): $old"
 flatpak build-export /tmp/repo /tmp/v2 stable >/dev/null
 flatpak remote-ls --user --updates --columns=ref,origin
+# v1 keeps running through the update: its deployment goes to .removed and
+# stays there while in use (see "clean: an old deployment in use").
+flatpak run --user --command=sleep org.rpak.E2E 600 >/tmp/running.log 2>&1 &
+running_pid=$!
+for _ in $(seq 100); do
+	ref_locked "$FLATPAK_USER_DIR/app/org.rpak.E2E/current/active/files/.ref" && break
+	sleep 0.1
+done
+ref_locked "$FLATPAK_USER_DIR/app/org.rpak.E2E/current/active/files/.ref" || { cat /tmp/running.log; fail "org.rpak.E2E v1 did not start"; }
 
 step "rpak update --user -y -v"
 rpak update --user -y -v > /tmp/update.log 2>&1 || {
@@ -316,6 +335,37 @@ keys "$new" > /tmp/keys
 echo "org.rpak.E2E: commitmeta $(stat -c %s "$(commitmeta org.rpak.E2E)") bytes"
 flatpak run --user --command=true org.rpak.E2E || fail "org.rpak.E2E does not run"
 pass "rpak update stripped xa.extra-data of the new commit"
+
+step "clean: an old deployment in use"
+old_deploy=$FLATPAK_USER_DIR/.removed/org.rpak.E2E-$old
+ls "$FLATPAK_USER_DIR/.removed"
+[ -d "$old_deploy" ] || fail "v1 is not in .removed while it runs"
+# flatpak ps may list more than one instance of the app; the pid is that of
+# the one holding the lock, which is one of them.
+flatpak ps --columns=application,child-pid | awk '$1 == "org.rpak.E2E" { print $2 }' > /tmp/child-pids
+echo "flatpak ps: org.rpak.E2E child-pids $(tr '\n' ' ' < /tmp/child-pids)"
+in_use="^ +[0-9.]+ (kB|MB)  \.removed/org\.rpak\.E2E-$old  used by org\.rpak\.E2E \(pid ([0-9]+)\)\$"
+for argv in "--dry-run" ""; do
+	rpak clean --user $argv | tee /tmp/clean.log
+	grep -qx "  Old deployments still in use" /tmp/clean.log || fail "rpak clean $argv: no section for deployments in use"
+	child=$(grep -E "$in_use" /tmp/clean.log | sed -E 's/.*\(pid ([0-9]+)\)$/\1/')
+	[ -n "$child" ] || fail "rpak clean $argv: no line for v1 used by org.rpak.E2E with a pid"
+	grep -qx "$child" /tmp/child-pids || fail "rpak clean $argv: pid $child is not a CHILD-PID of org.rpak.E2E in flatpak ps"
+	grep -qx "  Quit them and run rpak clean again" /tmp/clean.log || fail "rpak clean $argv: no hint"
+	grep -Eq "still in use\$" /tmp/clean.log || fail "rpak clean $argv: the total does not mention it"
+	[ -d "$old_deploy" ] || fail "rpak clean $argv removed the deployment in use"
+done
+pass "rpak clean lists v1 as used by org.rpak.E2E (pid $child) and keeps it"
+flatpak kill org.rpak.E2E 2>/dev/null || kill "$running_pid"
+wait "$running_pid" 2>/dev/null || true
+for _ in $(seq 100); do
+	ref_locked "$old_deploy/files/.ref" || break
+	sleep 0.1
+done
+rpak clean --user | tee /tmp/clean.log
+[ ! -e "$old_deploy" ] || fail "v1 kept after it quit"
+! grep -q "still in use" /tmp/clean.log || fail "still listed as in use after it quit"
+pass "once v1 quit, rpak clean removed it"
 
 step "rpak doctor"
 # A redaction point: a global override naming a path in $HOME, which

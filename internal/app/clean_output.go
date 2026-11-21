@@ -24,8 +24,16 @@ import (
 //	     10.7 MB  app.audionaut.Audionaut  deployed
 //	  Repository leftovers
 //	           -  repo/refs: 4 empty directories
+//	  Old deployments still in use
+//	     93.0 MB  .removed/ai.usemagpie.Magpie-4535…4f02  used by ai.usemagpie.Magpie (pid 217376)
+//	  Quit them and run rpak clean again
 //
-//	Freed 10.7 MB (2 items)
+//	Freed 10.7 MB (2 items); 93.0 MB still in use
+//
+// Old deployments that running apps still use are only listed, after what
+// an installation frees; they count neither as items nor as freed, but the
+// lines with totals say how much they keep, so that "Nothing to free" is
+// never all a user sees of a .removed that takes gigabytes.
 
 // cleanKind is what the items of a section are, which decides how they
 // are shown.
@@ -55,6 +63,9 @@ type cleanPrinter struct {
 	title  string // subheading, printed before its first item
 	items  int    // in the current installation
 	freed  int64  // by the current installation
+	inUse  int64  // in use, in the current installation
+
+	inUseAll int64 // in use, in all installations
 }
 
 func newCleanPrinter(w io.Writer, dryRun bool) *cleanPrinter {
@@ -87,7 +98,7 @@ func (p *cleanPrinter) group(title, note string) {
 		l.add(sanitize(note), sgrFaint)
 	}
 	p.write(l)
-	p.title, p.items, p.freed = "", 0, 0
+	p.title, p.items, p.freed, p.inUse = "", 0, 0, 0
 }
 
 func (p *cleanPrinter) installation(inst installation.Installation) {
@@ -113,11 +124,7 @@ func (p *cleanPrinter) item(size int64, what string) {
 	case kindCommit:
 		label, note = commitLabel(what)
 	default:
-		label = what
-		if rest, ok := strings.CutPrefix(what, p.base+"/"); ok && p.base != "" {
-			label = rest
-		}
-		label = p.tilde(label)
+		label = p.relative(what)
 	}
 	p.write(p.itemLine(size, sanitize(label), sanitize(note)))
 }
@@ -125,15 +132,29 @@ func (p *cleanPrinter) item(size int64, what string) {
 // itemLine is "    SIZE  LABEL  NOTE", the label shortened in the middle to
 // fit the terminal, and the note dropped before the label gets short.
 func (p *cleanPrinter) itemLine(size int64, label, note string) line {
+	return p.itemLineKeep(size, label, 24, note)
+}
+
+// itemLineKeep is itemLine with the shortest the label may get before the
+// first of notes that fits is used instead; with no note fitting, none.
+func (p *cleanPrinter) itemLineKeep(size int64, label string, keep int, notes ...string) line {
 	sizeText := "-"
 	if size > 0 {
 		sizeText = humanSize(size)
 	}
 	l := line{{strings.Repeat(" ", cleanItemIndent) + padLeft(sizeText, cleanSizeWidth) + strings.Repeat(" ", cleanGap), ""}}
+	var note string
+	if len(notes) > 0 {
+		note = notes[0]
+	}
 	if width := p.t.width(); width > 0 {
 		room := width - l.width()
-		if note != "" && room-cleanGap-textWidth(note) < min(textWidth(label), 24) {
-			note = ""
+		note = ""
+		for _, n := range notes {
+			if n != "" && room-cleanGap-textWidth(n) >= min(textWidth(label), keep) {
+				note = n
+				break
+			}
 		}
 		if note != "" {
 			room -= cleanGap + textWidth(note)
@@ -146,6 +167,47 @@ func (p *cleanPrinter) itemLine(size int64, label, note string) line {
 		l.add(note, sgrFaint)
 	}
 	return l
+}
+
+// relative shows path relative to the installation, with "~" for home.
+func (p *cleanPrinter) relative(path string) string {
+	if rest, ok := strings.CutPrefix(path, p.base+"/"); ok && p.base != "" {
+		path = rest
+	}
+	return p.tilde(path)
+}
+
+// inUseSection lists the old deployments of the current installation that
+// running instances keep, as items are shown but not counted, and ends
+// with what to do about them. Nothing at all if there are none.
+func (p *cleanPrinter) inUseSection(deploys []clean.InUse) {
+	if len(deploys) == 0 {
+		return
+	}
+	p.title = "" // a subheading still waiting for items has none coming
+	p.write(line{{"  Old deployments still in use", ""}})
+	// The note is what this section is for: who keeps the deployment, and
+	// the pid to quit. The path, which starts with the ID anyway, gives way
+	// first, down to ".removed/" and a few characters; then the pid goes.
+	for _, d := range deploys {
+		short := "used by " + d.ID
+		full := short
+		if d.PID > 0 {
+			full += fmt.Sprintf(" (pid %d)", d.PID)
+		}
+		p.inUse += d.Size
+		p.inUseAll += d.Size
+		p.write(p.itemLineKeep(d.Size, sanitize(p.relative(d.Path)), 12, sanitize(full), sanitize(short)))
+	}
+	p.write(line{{"  ", ""}, {"Quit them and run rpak clean again", sgrFaint}})
+}
+
+// inUseText is "; 1.2 GB still in use" to add to a total, or "".
+func inUseText(size int64) string {
+	if size <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %s still in use", humanSize(size))
 }
 
 // commitLabel shows the ref of a commit whose installers were dropped as
@@ -177,9 +239,9 @@ func (p *cleanPrinter) summary(readOnly bool, hint string, freed int64) {
 	case readOnly && freed > 0:
 		p.write(line{{"  ", ""}, {fmt.Sprintf("Would free %s; %s", humanSize(freed), hint), sgrYellow}})
 	case p.items == 0:
-		p.write(line{{"  ", ""}, {"Nothing to free", sgrFaint}})
+		p.write(line{{"  ", ""}, {"Nothing to free" + inUseText(p.inUse), sgrFaint}})
 	default:
-		p.write(line{{"  ", ""}, {p.freedText(p.items, p.freed, false), ""}})
+		p.write(line{{"  ", ""}, {p.freedText(p.items, p.freed, false), ""}, {inUseText(p.inUse), ""}})
 	}
 }
 
@@ -265,12 +327,12 @@ func (p *cleanPrinter) total(items int, freed int64) {
 		if p.dryRun {
 			text = "Nothing to free"
 		}
-		p.write(line{{text, ""}})
+		p.write(line{{text + inUseText(p.inUseAll), ""}})
 		return
 	}
 	sgr := sgrGreen
 	if p.dryRun {
 		sgr = ""
 	}
-	p.write(line{{p.freedText(items, freed, true), sgr}})
+	p.write(line{{p.freedText(items, freed, true), sgr}, {inUseText(p.inUseAll), ""}})
 }

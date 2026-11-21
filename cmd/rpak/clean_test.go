@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -722,5 +723,75 @@ func TestCleanSkipsPrefetchDirsInUse(t *testing.T) {
 	}
 	if _, err := os.Stat(marked); err != nil {
 		t.Error("removed a directory in use")
+	}
+}
+
+// TestCleanRemovedInUse: old deployments that a running app still uses are
+// listed with the app, by default and in a dry run, kept and not counted;
+// the one no app uses goes; once the app has quit, rpak clean frees the
+// rest.
+func TestCleanRemovedInUse(t *testing.T) {
+	e := newEnv(t)
+	installation(t, e.base)
+	removed := filepath.Join(e.base, ".removed")
+	running := filepath.Join(removed, "com.example.Running-"+commitA)
+	put(t, filepath.Join(running, "files", ".ref"), nil)
+	put(t, filepath.Join(running, "files", "big"), make([]byte, 200_000))
+	put(t, filepath.Join(running, "metadata"), []byte("[Application]\nname=com.example.Running\n"))
+	unused := filepath.Join(removed, "com.example.Unused-"+commitB)
+	put(t, filepath.Join(unused, "files", ".ref"), nil)
+	put(t, filepath.Join(unused, "files", "small"), make([]byte, 50_000))
+	noRef := filepath.Join(removed, "com.example.NoRef-"+strings.Repeat("c", 64))
+	os.MkdirAll(filepath.Join(noRef, "files"), 0o755)
+	release := holdLock(t, filepath.Join(running, "files", ".ref"))
+
+	// Sizes depend on the file system's allocation. holdLock takes an OFD
+	// lock, whose holder F_GETLK does not tell: no pid.
+	section := regexp.MustCompile(`\n  Old deployments no longer in use\n` +
+		` +[0-9.]+ kB  \.removed/com\.example\.Unused-` + commitB + `\n` +
+		`  Old deployments still in use\n` +
+		` +2[0-9.]+ kB  \.removed/com\.example\.Running-` + commitA + `  used by com\.example\.Running\n` +
+		`  Quit them and run rpak clean again\n\n` +
+		`Would free [0-9.]+ kB \(3 items\); 2[0-9.]+ kB still in use\n$`)
+
+	before := snapshot(t, e.base)
+	code, stdout, stderr := e.runOut("clean", "--user", "--dry-run")
+	if code != 0 || !section.MatchString(stdout) {
+		t.Fatalf("dry run: exit %d\n%s%s", code, stdout, stderr)
+	}
+	if after := snapshot(t, e.base); after != before {
+		t.Error("the dry run changed files")
+	}
+
+	// The real run says the same, but freed.
+	code, stdout, stderr = e.runOut("clean", "--user", "-v")
+	want := strings.Replace(section.String(), "Would free", "Freed", 1)
+	if code != 0 || !regexp.MustCompile(want).MatchString(stdout) {
+		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	// Kept for another reason: only told with -v. In use: not told twice.
+	if !strings.Contains(stderr, "keeping "+noRef+": files/.ref: ") || strings.Contains(stderr, "com.example.Running") {
+		t.Errorf("stderr:\n%s", stderr)
+	}
+	for path, want := range map[string]bool{running: true, unused: false, noRef: true} {
+		if _, err := os.Lstat(path); (err == nil) != want {
+			t.Errorf("%s: there %v, want %v", path, err == nil, want)
+		}
+	}
+
+	// Only what is in use left: the total says so instead of a bare
+	// "Nothing freed".
+	code, stdout, _ = e.runOut("clean", "--user")
+	if code != 0 || !strings.Contains(stdout, "  used by com.example.Running\n  Quit them and run rpak clean again\n\nNothing freed; 2") {
+		t.Errorf("only in use: exit %d\n%s", code, stdout)
+	}
+
+	release()
+	code, stdout, _ = e.runOut("clean", "--user")
+	if code != 0 || strings.Contains(stdout, "still in use") || !strings.Contains(stdout, "kB  .removed/com.example.Running-"+commitA+"\n") {
+		t.Errorf("after the app quit: exit %d\n%s", code, stdout)
+	}
+	if _, err := os.Lstat(running); err == nil {
+		t.Error("kept after the app quit")
 	}
 }
