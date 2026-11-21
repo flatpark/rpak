@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/flatpark/rpak/internal/extradata"
 	fr "github.com/flatpark/rpak/internal/forceruntime"
 	"github.com/flatpark/rpak/internal/installation"
+	"github.com/flatpark/rpak/internal/metadata"
 )
 
 // forcedInstallation lays out a user installation with org.rpak.Deploy
@@ -183,5 +185,61 @@ func TestForcedSection(t *testing.T) {
 	s, ok = d.forcedSection(d.forced(), false)
 	if !ok || !strings.Contains(s.Items[0].Text, "patches.json") {
 		t.Errorf("broken records: %+v", s)
+	}
+}
+
+// TestExtraDataPatch: a record of replaced extra-data shows in the
+// Patches section, with the URL used and upstream's, and in the app's
+// section; an app with that record coming from rpak-local is no orphan.
+func TestExtraDataPatch(t *testing.T) {
+	inst, commit := forcedInstallation(t, false)
+	sum := strings.Repeat("e", 64)
+	rec := fr.ExtraRecord{Ref: deployRef, Remote: "flathub", Upstream: strings.Repeat("c", 64),
+		Sources: []extradata.Replacement{{Name: "app.deb", File: extradata.File{URL: "https://new.example.com/app_2.deb", SHA256: sum, Size: 2048},
+			Base: extradata.File{URL: "https://old.example.com/app_1.deb", SHA256: strings.Repeat("a", 64), Size: 1024}}}}
+	if err := fr.SaveExtra(inst, []fr.ExtraRecord{rec}); err != nil {
+		t.Fatal(err)
+	}
+	items := appItems(t, inst, commit)
+	if got := grepItems(items, "extra-data replaced: app.deb from https://new.example.com/app_2.deb instead of upstream's https://old.example.com/app_1.deb  (rpak patch extra-data, upstream remote flathub)"); len(got) != 1 {
+		t.Errorf("no extra-data line:\n%s", strings.Join(items, "\n"))
+	}
+	if got := grepItems(items, "differs from its commit"); len(got) != 0 {
+		t.Errorf("reported as an unexplained difference: %q", got)
+	}
+	env := func(k string) (string, bool) {
+		if k == "FLATPAK_USER_DIR" {
+			return inst, true
+		}
+		return "", false
+	}
+	d := &doctor{cfg: Config{LookupEnv: env, Home: t.TempDir()}}
+	f := d.forced()
+	// As if it came from rpak-local: no orphan.
+	f.fromRepo = []string{deployRef}
+	s, ok := d.forcedSection(f, true)
+	if !ok {
+		t.Fatal("no section")
+	}
+	var lines []string
+	for _, it := range s.Items {
+		lines = append(lines, it.Text)
+	}
+	text := strings.Join(lines, "\n")
+	// The fixture's deployment comes from a remote of its own, so the
+	// replacement is not in effect.
+	want := "org.rpak.Deploy/x86_64/stable  extra-data: app.deb from https://new.example.com/app_2.deb (2.0 kB, sha256 " + sum +
+		") instead of upstream's https://old.example.com/app_1.deb  (upstream remote flathub, upstream commit cccccccccccc); installed from "
+	if !strings.Contains(text, want) || !strings.Contains(text, ", not rpak-local: not replaced now") {
+		t.Errorf("lacks %q:\n%s", want, text)
+	}
+	if strings.Contains(text, "has no record") || strings.Contains(text, "no patches") {
+		t.Errorf("an extra-data record taken for none:\n%s", text)
+	}
+	if got := deployedSource([]metadata.Source{{Name: "app.deb", URI: "https://new.example.com/app_2.deb", Checksum: sum}}, rec.Sources[0]); got != "has it" {
+		t.Errorf("deployedSource: %s", got)
+	}
+	if got := deployedSource([]metadata.Source{{Name: "app.deb", URI: "https://old.example.com/app_1.deb", Checksum: "x"}}, rec.Sources[0]); got != "has https://old.example.com/app_1.deb (sha256 x)" {
+		t.Errorf("deployedSource: %s", got)
 	}
 }

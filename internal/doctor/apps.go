@@ -221,6 +221,30 @@ func (d *doctor) appDetails(id string, ai *appInst) {
 		},
 		func() { remote, ai.remoteErr = d.remoteRef(ai.in, origin, ref) },
 	)
+	// An app whose extra-data rpak replaced comes from rpak-local: what it
+	// downloads is in its own commit, checked as installed; upstream's
+	// commit, beside it, has the files it replaced.
+	if ex, ok := d.force.extraRecord(ai.in.inst.User, ref); ok && origin == fr.RemoteName {
+		if ai.metaErr == nil {
+			ai.checks = append(ai.checks, d.checkCommit(installed, ref, "installed commit, extra-data replaced by rpak patch "+fr.ExtraKind))
+		}
+		upstream, err := d.remoteRef(ai.in, ex.Remote, ref)
+		if err != nil {
+			ai.remoteErr = fmt.Errorf("upstream: %w", err)
+			return
+		}
+		ai.remoteErr = nil
+		var names []string
+		for _, rep := range ex.Sources {
+			names = append(names, rep.Name)
+		}
+		label := "upstream remote " + ex.Remote + " commit, the one reexported"
+		if upstream.Commit != ex.Upstream {
+			label = "upstream remote " + ex.Remote + " commit, newer than the one reexported: rpak update reexports it, or drops the patch of what upstream changed"
+		}
+		ai.checks = append(ai.checks, d.checkCommit(upstream.Metadata, ref, label+"; rpak replaced "+strings.Join(names, ", ")))
+		return
+	}
 	// A reexported app comes from rpak-local; its extra-data are
 	// upstream's, checked there.
 	if r, ok := d.force.record(ai.in.inst.User, ref); ok && r.Method == fr.MethodReexport && origin == fr.RemoteName {

@@ -328,7 +328,7 @@ func TestCompleteForceRuntime(t *testing.T) {
 	e := newEnv(t)
 	e.write("complete-out", "--user \n--no-deps \n")
 	// install/update: flatpak's options and rpak's own.
-	if out, _ := e.complete(nil, "rpak install --", "15", "--"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n" {
+	if out, _ := e.complete(nil, "rpak install --", "15", "--"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n--extra-data=\n" {
 		t.Errorf("install --: %q", out)
 	}
 	if out, _ := e.complete(nil, "rpak update --fo", "16", "--fo"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n" {
@@ -349,6 +349,16 @@ func TestCompleteForceRuntime(t *testing.T) {
 	if out, _ := e.complete(nil, "rpak patch --reset=f", "20", "f"); out != "force-runtime \n" {
 		t.Errorf("patch --reset=f: %q", out)
 	}
+	if out, _ := e.complete(nil, "rpak patch --reset=", "19", ""); out != "force-runtime \nextra-data \n" {
+		t.Errorf("patch --reset=: %q", out)
+	}
+	if out, _ := e.complete(nil, "rpak patch --ex", "15", "--ex"); out != "--extra-data=\n" {
+		t.Errorf("patch --ex: %q", out)
+	}
+	// A URL is not completed.
+	if out, _ := e.complete(nil, "rpak install --extra-data=h", "27", "h"); out != "" {
+		t.Errorf("install --extra-data=h: %q", out)
+	}
 	// --force-runtime: the apps installed in the user installation.
 	os.MkdirAll(filepath.Join(e.base, "app", "org.example.C", "x86_64", "stable", "c"), 0o755)
 	os.Symlink("c", filepath.Join(e.base, "app", "org.example.C", "x86_64", "stable", "active"))
@@ -359,8 +369,15 @@ func TestCompleteForceRuntime(t *testing.T) {
 	os.MkdirAll(filepath.Join(e.base, "rpak"), 0o755)
 	os.WriteFile(filepath.Join(e.base, "rpak", "patches.json"), []byte(`{"version":1,"apps":{
 		"app/org.example.A/x86_64/stable":{"force-runtime":{"method":"patch"}},
-		"app/org.example.B/x86_64/stable":{"force-runtime":{"method":"reexport"}}}}`), 0o644)
-	if out, _ := e.complete(nil, "rpak patch --reset org.example.A ", "33", ""); out != "org.example.B \n" {
+		"app/org.example.B/x86_64/stable":{"force-runtime":{"method":"reexport"}},
+		"app/org.example.D/x86_64/stable":{"extra-data":{"remote":"r","upstream_commit":"c","sources":[{"name":"a.deb"}]}}}}`), 0o644)
+	if out, _ := e.complete(nil, "rpak patch --reset org.example.A ", "33", ""); out != "org.example.B \norg.example.D \n" {
 		t.Errorf("reset: %q", out)
+	}
+	if out, _ := e.complete(nil, "rpak patch --reset=extra-data ", "30", ""); out != "org.example.D \n" {
+		t.Errorf("reset=extra-data: %q", out)
+	}
+	if out, _ := e.complete(nil, "rpak patch --reset=force-runtime ", "33", ""); out != "org.example.A \norg.example.B \n" {
+		t.Errorf("reset=force-runtime: %q", out)
 	}
 }

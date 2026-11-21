@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -16,24 +17,28 @@ import (
 
 	"github.com/flatpark/rpak/internal/args"
 	"github.com/flatpark/rpak/internal/doctor"
+	"github.com/flatpark/rpak/internal/extradata"
 	fr "github.com/flatpark/rpak/internal/forceruntime"
 	"github.com/flatpark/rpak/internal/installation"
+	"github.com/flatpark/rpak/internal/metadata"
 	"github.com/flatpark/rpak/internal/ostree"
 	"github.com/flatpark/rpak/internal/plan"
 	"github.com/flatpark/rpak/internal/prefetch"
 	"github.com/flatpark/rpak/internal/summary"
+	"github.com/flatpark/rpak/internal/units"
 )
 
-// rpak install/update --force-runtime, and the records it leaves, see
-// package forceruntime. Without the option and without records nothing
-// here runs: transaction only checks that the records file is missing,
-// and the command is run as before, without any extra flatpak command.
+// rpak install/update --force-runtime and --extra-data, and the records
+// they leave, see packages forceruntime and extradata. Without the options
+// and without records nothing here runs: transaction only checks that the
+// records file is missing, and the command is run as before, without any
+// extra flatpak command.
 
 // transaction runs an update or install command, argv[i] being the
 // command.
 func transaction(version, kind string, argv []string, i int) int {
 	parsed := args.Parse(kind, argv[i+1:])
-	if !parsed.ForceRuntime {
+	if !parsed.ForceRuntime && len(parsed.ExtraData) == 0 {
 		user, err := prefetch.DefaultUserBaseDir()
 		if err != nil || !fr.HasRecords(user) || parsed.SkipReason == "--help" ||
 			(kind == "install" && parsed.SkipReason != "") {
@@ -75,6 +80,19 @@ type forceFlow struct {
 	// before are the records as loaded: what changed is what a dry run
 	// shows, and what is announced (announceChanged).
 	before []fr.Record
+	// extras are the extra-data records, extrasBefore as loaded.
+	extras, extrasBefore []fr.ExtraRecord
+	// specs are the --extra-data values given.
+	specs []extradata.Spec
+	// back are apps whose last patch went away by itself (upstream
+	// replaced the source): installed from their remote again after the
+	// update.
+	back []item
+	// fetched are the directories of the files downloaded for
+	// --extra-data; ran reports that a flatpak transaction ran, which
+	// used them (and removes them, see runFlatpak).
+	fetched []string
+	ran     bool
 	// warned are the apps whose experimental line has been printed.
 	warned   map[string]bool
 	dryRun   bool
@@ -109,6 +127,16 @@ func newForceFlow(version, kind string, argv []string, i int, parsed args.Parsed
 			return nil, 2, false
 		}
 	}
+	specs, err := parseSpecs(parsed.ExtraData)
+	if err != nil {
+		fmt.Fprintf(stderr, "rpak: %v\n", err)
+		return nil, 2, false
+	}
+	f.specs = specs
+	if len(specs) > 0 && parsed.SkipReason != "" {
+		fmt.Fprintf(stderr, "rpak: %s cannot be used with %s\n", extradata.Option, parsed.SkipReason)
+		return nil, 2, false
+	}
 	user, err := prefetch.DefaultUserBaseDir()
 	if err != nil {
 		fmt.Fprintf(stderr, "rpak: cannot find the flatpak user directory: %v\n", err)
@@ -130,18 +158,64 @@ func newForceFlow(version, kind string, argv []string, i int, parsed args.Parsed
 	return f, 0, true
 }
 
+// parseSpecs reads the --extra-data values; two for the same NAME are an
+// error (two that pick the same source are found when it is picked).
+func parseSpecs(values []string) ([]extradata.Spec, error) {
+	var out []extradata.Spec
+	seen := map[string]bool{}
+	for _, v := range values {
+		s, err := extradata.ParseSpec(v)
+		if err != nil {
+			return nil, err
+		}
+		if s.Name != "" && seen[s.Name] {
+			return nil, fmt.Errorf("%s=%s=...: %s is given twice", extradata.Option, s.Name, s.Name)
+		}
+		seen[s.Name] = true
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// given names the patching options given, for messages.
+func (f *forceFlow) given() string {
+	var opts []string
+	if f.parsed.ForceRuntime {
+		opts = append(opts, args.ForceRuntimeOption)
+	}
+	if len(f.specs) > 0 {
+		opts = append(opts, extradata.Option)
+	}
+	return strings.Join(opts, " and ")
+}
+
 // dryRunEnv reports RPAK_DRY_RUN: show what would be done, do nothing.
 func dryRunEnv() bool {
 	return os.Getenv("RPAK_DRY_RUN") != "" && os.Getenv("RPAK_DRY_RUN") != "0"
 }
 
 // setRecords sets the records as loaded, and a copy of them in before.
-func (f *forceFlow) setRecords(records []fr.Record) {
+func (f *forceFlow) setRecords(records []fr.Record, extras []fr.ExtraRecord) {
 	f.records = records
 	f.before = append([]fr.Record(nil), records...)
+	f.extras = extras
+	f.extrasBefore = append([]fr.ExtraRecord(nil), extras...)
 }
 
-func (f *forceFlow) close() { f.unlock() }
+// hasPatches reports whether any app is patched.
+func (f *forceFlow) hasPatches() bool { return len(f.records) > 0 || len(f.extras) > 0 }
+
+// close ends the flow: the files downloaded for --extra-data go if no
+// flatpak transaction got to use them (the next try downloads them again,
+// not knowing their checksums before), and the lock is released.
+func (f *forceFlow) close() {
+	if !f.ran && len(f.fetched) > 0 {
+		if err := prefetch.RemoveDirs(f.user, f.fetched); err != nil {
+			f.warn("removing the downloaded extra-data: %v", err)
+		}
+	}
+	f.unlock()
+}
 
 // lockForce keeps two rpak runs from forcing at the same time: flock() on
 // <user installation>/rpak/.lock, waited for.
@@ -167,23 +241,26 @@ func lockForce(user string) (func(), error) {
 	return func() { file.Close() }, nil
 }
 
-// loadRecords reads the records. A file that cannot be read is moved
-// aside (with move) and taken as no records: forcing must never keep rpak
-// from updating.
-func loadRecords(user string, stderr io.Writer, move bool) []fr.Record {
+// loadRecords reads the records of both kinds. A file that cannot be read
+// is moved aside (with move) and taken as no records: patching must never
+// keep rpak from updating.
+func loadRecords(user string, stderr io.Writer, move bool) ([]fr.Record, []fr.ExtraRecord) {
 	records, err := fr.Load(user)
+	var extras []fr.ExtraRecord
 	if err == nil {
-		return records
+		if extras, err = fr.LoadExtra(user); err == nil {
+			return records, extras
+		}
 	}
 	path := fr.RecordsPath(user)
 	if move {
 		if rerr := os.Rename(path, path+".broken"); rerr == nil {
-			fmt.Fprintf(stderr, "rpak: warning: cannot read %s (%v); moved it to %s.broken, no runtime is kept forced\n", path, err, path)
-			return nil
+			fmt.Fprintf(stderr, "rpak: warning: cannot read %s (%v); moved it to %s.broken, no patch is kept\n", path, err, path)
+			return nil, nil
 		}
 	}
-	fmt.Fprintf(stderr, "rpak: warning: cannot read %s (%v); no runtime is kept forced\n", path, err)
-	return nil
+	fmt.Fprintf(stderr, "rpak: warning: cannot read %s (%v); no patch is kept\n", path, err)
+	return nil, nil
 }
 
 func (f *forceFlow) warn(format string, a ...any) {
@@ -200,9 +277,9 @@ func (f *forceFlow) fail(code int, format string, a ...any) int {
 }
 
 // experimental is the line printed whenever an app is made to run on
-// another runtime.
-func experimental(id string, from, to fr.Pref) string {
-	return fmt.Sprintf("rpak: experimental: %s was built for %s, now runs on %s; it may break. Undo: rpak patch --reset %s", id, from, to, id)
+// another runtime; undo is the --reset that undoes it.
+func experimental(id string, from, to fr.Pref, undo string) string {
+	return fmt.Sprintf("rpak: experimental: %s was built for %s, now runs on %s; it may break. Undo: rpak patch %s %s", id, from, to, undo, id)
 }
 
 // announce prints the experimental line of an app, once per run, and not
@@ -215,7 +292,12 @@ func (f *forceFlow) announce(ref string, from, to fr.Pref) {
 		f.warned = map[string]bool{}
 	}
 	f.warned[ref] = true
-	fmt.Fprintln(f.stderr, experimental(idOf(ref), from, to))
+	// Plain --reset would undo the app's replaced extra-data too.
+	undo := "--reset"
+	if _, ok := fr.FindExtra(f.extras, ref); ok {
+		undo += "=" + fr.Kind
+	}
+	fmt.Fprintln(f.stderr, experimental(idOf(ref), from, to, undo))
 }
 
 // announceChanged prints the experimental line of every app whose record
@@ -235,6 +317,57 @@ func (f *forceFlow) announceChanged() {
 		}
 		f.announce(r.Ref, from, to)
 	}
+	for _, r := range f.extras {
+		old, _ := fr.FindExtra(f.extrasBefore, r.Ref)
+		if sameFiles(old.Sources, r.Sources) {
+			continue
+		}
+		for _, line := range experimentalExtra(r, old) {
+			fmt.Fprintln(f.stderr, line)
+		}
+	}
+}
+
+// sameFiles reports whether two sets of replacements download the same
+// files from the same places.
+func sameFiles(a, b []extradata.Replacement) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].File != b[i].File {
+			return false
+		}
+	}
+	return true
+}
+
+// experimentalExtra are the lines printed when an app's replaced
+// extra-data are new or changed: what it downloads now, instead of what,
+// and, last, how to undo it. Not printed again while the record stays.
+func experimentalExtra(r, old fr.ExtraRecord) []string {
+	var out []string
+	for _, rep := range r.Sources {
+		if o, ok := findReplacement(old.Sources, rep.Name); ok && o.File == rep.File {
+			continue
+		}
+		out = append(out, fmt.Sprintf("rpak: experimental: %s downloads its extra-data %s from %s (%s, sha256 %s) instead of %s; that file is your choice, its packagers did not pick it.",
+			idOf(r.Ref), rep.Name, rep.URL, units.Size(rep.Size), rep.SHA256, rep.Base.URL))
+	}
+	if len(out) == 0 {
+		// Only sources went.
+		return nil
+	}
+	return append(out, "rpak: Undo: rpak patch --reset="+fr.ExtraKind+" "+idOf(r.Ref))
+}
+
+func findReplacement(reps []extradata.Replacement, name string) (extradata.Replacement, bool) {
+	for _, r := range reps {
+		if r.Name == name {
+			return r, true
+		}
+	}
+	return extradata.Replacement{}, false
 }
 
 // save writes the records and announces the new ones. A dry run writes
@@ -248,6 +381,11 @@ func (f *forceFlow) save() {
 	if err := fr.Save(f.user, f.records); err != nil {
 		f.warn("cannot save %s: %v", fr.RecordsPath(f.user), err)
 	}
+	if err := fr.SaveExtra(f.user, f.extras); err != nil {
+		f.warn("cannot save %s: %v", fr.RecordsPath(f.user), err)
+	}
+	f.before = append([]fr.Record(nil), f.records...)
+	f.extrasBefore = append([]fr.ExtraRecord(nil), f.extras...)
 }
 
 // dry prints what a dry run would do.
@@ -300,6 +438,26 @@ func (f *forceFlow) showChanges() {
 			f.dry("forget the %s patch of %s in %s", fr.Kind, idOf(r.Ref), fr.RecordsPath(f.user))
 		}
 	}
+	for _, r := range f.extras {
+		old, had := fr.FindExtra(f.extrasBefore, r.Ref)
+		if had && reflect.DeepEqual(old, r) {
+			continue
+		}
+		changed = true
+		verb := "record"
+		if had {
+			verb = "update the record of"
+		}
+		for _, rep := range r.Sources {
+			f.dry("%s %s in %s: %s %s, %s instead of %s", verb, idOf(r.Ref), fr.RecordsPath(f.user), fr.ExtraKind, rep.Name, rep.URL, rep.Base.URL)
+		}
+	}
+	for _, r := range f.extrasBefore {
+		if _, ok := fr.FindExtra(f.extras, r.Ref); !ok {
+			changed = true
+			f.dry("forget the %s patch of %s in %s", fr.ExtraKind, idOf(r.Ref), fr.RecordsPath(f.user))
+		}
+	}
 	if !changed {
 		f.dry("leave %s as it is", fr.RecordsPath(f.user))
 	}
@@ -315,7 +473,13 @@ func (f *forceFlow) dropStale() {
 			kept = append(kept, r)
 		}
 	}
-	if len(kept) == len(f.records) {
+	var keptExtra []fr.ExtraRecord
+	for _, r := range f.extras {
+		if _, ok, _ := fr.Active(f.user, r.Ref); ok {
+			keptExtra = append(keptExtra, r)
+		}
+	}
+	if len(kept) == len(f.records) && len(keptExtra) == len(f.extras) {
 		return
 	}
 	var gone []string
@@ -324,7 +488,12 @@ func (f *forceFlow) dropStale() {
 			gone = append(gone, r.Ref)
 		}
 	}
-	f.records = kept
+	for _, r := range f.extras {
+		if _, ok := fr.FindExtra(keptExtra, r.Ref); !ok && !slices.Contains(gone, r.Ref) {
+			gone = append(gone, r.Ref)
+		}
+	}
+	f.records, f.extras = kept, keptExtra
 	if !f.dryRun {
 		// A dry run shows the forgotten records with the rest.
 		f.save()
@@ -349,7 +518,7 @@ func (f *forceFlow) unexport(refs []string) {
 			users = append(users, ref)
 		}
 	}
-	decision := fr.DecideLocalCleanup(f.records, users, hasRemote || statErr == nil)
+	decision := fr.DecideLocalCleanup(f.records, f.extras, users, hasRemote || statErr == nil)
 	if f.dryRun {
 		if statErr == nil {
 			f.dry("remove %s from the local repository %s", strings.Join(refs, ", "), fr.RepoPath(f.user))
@@ -480,6 +649,7 @@ func (f *forceFlow) cmdArgv(command string, rest ...string) []string {
 
 // runTransaction runs flatpak install/update with prefetching.
 func (f *forceFlow) runTransaction(kind string, argv []string) int {
+	f.ran = true
 	return runFlatpak(f.version, kind, argv, len(f.globals))
 }
 
@@ -500,18 +670,29 @@ func (f *forceFlow) normal() int {
 	return f.runTransaction(f.kind, f.cmdArgv(f.kind, args.StripForceRuntime(f.args)...))
 }
 
-// item is an app being forced.
+// item is an app being patched.
 type item struct {
 	arg string // the argument that named it
 	remoteRef
 	// upstream is the remote the app comes from.
 	upstream string
-	res      fr.Resolution
-	target   string
-	method   string
+	// res is the runtime it runs on; runtimePatch reports a force-runtime
+	// patch, given or recorded (res may still be the original runtime,
+	// when upstream got there).
+	res          fr.Resolution
+	runtimePatch bool
+	target       string
+	method       string
+	// extra are its extra-data replacements after this run, nil for none.
+	extra []extradata.Replacement
 	// installed: the app is installed in the user installation;
 	// fromLocal: from rpak-local.
 	installed, fromLocal bool
+}
+
+// job is the reexport of the item.
+func (it item) job() fr.Job {
+	return fr.Job{Ref: it.ref, Upstream: it.commit, Runtime: it.res, ExtraData: it.extra}
 }
 
 func (f *forceFlow) userOnlyOption() bool {
@@ -533,17 +714,209 @@ func (f *forceFlow) newItem(arg, upstream string, info remoteRef, target string)
 	if fr.HasExtraData(info.metadata) {
 		it.method = fr.MethodReexport
 	}
+	it.runtimePatch = true
 	if d, ok, _ := fr.Active(f.user, info.ref); ok {
 		it.installed, it.fromLocal = true, d.Origin == fr.RemoteName
 	}
+	f.attachExtra(&it)
 	return it, it.res.Forced, nil
 }
 
-// install is rpak install with --force-runtime, or with records.
+// plainItem is an app reexported without forcing its runtime: for its
+// extra-data.
+func (f *forceFlow) plainItem(arg, upstream string, info remoteRef) (item, error) {
+	it := item{arg: arg, remoteRef: info, upstream: upstream, method: fr.MethodReexport}
+	orig, err := fr.RuntimeOf(info.metadata)
+	if err != nil {
+		return it, err
+	}
+	it.res = fr.Resolution{Original: orig, Runtime: orig}
+	if d, ok, _ := fr.Active(f.user, info.ref); ok {
+		it.installed, it.fromLocal = true, d.Origin == fr.RemoteName
+	}
+	f.attachExtra(&it)
+	return it, nil
+}
+
+// attachExtra gives an item the extra-data replacements recorded for its
+// app that still apply to the upstream commit it is made of (see
+// extradata.Carry); those upstream changed are dropped, and said so.
+func (f *forceFlow) attachExtra(it *item) {
+	r, ok := fr.FindExtra(f.extras, it.ref)
+	if !ok {
+		return
+	}
+	kept, dropped := extradata.Carry(r.Sources, it.metadata, it.ref)
+	for _, d := range dropped {
+		f.note("%s: upstream updated %s, %s patch dropped", idOf(it.ref), d.Name, fr.ExtraKind)
+	}
+	it.extra = kept
+	if len(kept) > 0 {
+		it.method = fr.MethodReexport
+	}
+}
+
+// recordItem records what an item made of its app, once that is
+// installed: its forced runtime, its extra-data replacements (none removes
+// the record).
+func (f *forceFlow) recordItem(it item) {
+	if it.runtimePatch {
+		if it.method == fr.MethodReexport {
+			f.records = fr.Set(f.records, reexportRecord(it))
+		} else {
+			f.records = fr.Set(f.records, fr.Record{
+				Ref: it.ref, Target: it.target, Remote: it.upstream, Method: fr.MethodPatch,
+				Original: it.res.Original.String(), Runtime: it.res.Original.String(),
+			})
+		}
+	}
+	f.extras = fr.SetExtra(f.extras, fr.ExtraRecord{Ref: it.ref, Remote: it.upstream, Upstream: it.commit, Sources: it.extra})
+}
+
+// announceItem prints the experimental line of an item whose runtime is
+// forced, as its deployment is made anew. Its extra-data are announced
+// when their record changes (announceChanged).
+func (f *forceFlow) announceItem(it item) {
+	if it.res.Forced {
+		f.announce(it.ref, it.res.Original, it.res.Runtime)
+	}
+}
+
+// upstreamOf is the remote an app from rpak-local was reexported from, and
+// the upstream commit, as its records have them.
+func (f *forceFlow) upstreamOf(ref string) (remote, commit string, ok bool) {
+	if r, ok := fr.Find(f.records, ref); ok {
+		return r.Remote, r.Upstream, true
+	}
+	if r, ok := fr.FindExtra(f.extras, ref); ok {
+		return r.Remote, r.Upstream, true
+	}
+	return "", "", false
+}
+
+// extraItem is an app given --extra-data: reexported from upstream's
+// commit info with the sources the specs choose replaced (downloaded
+// here, see fetchExtra), its other recorded replacements kept, and its
+// runtime forced if --force-runtime is given or recorded. code is the
+// exit code of an error: 2 for what the user has to say otherwise.
+func (f *forceFlow) extraItem(arg, upstream string, info remoteRef) (item, int, error) {
+	hasExtra := metadata.HasExtraData(info.metadata)
+	if len(f.specs) > 0 && !hasExtra {
+		return item{}, 2, fmt.Errorf("%s has no extra-data: %s replaces the download of an extra-data source", idOf(info.ref), extradata.Option)
+	}
+	target, forced := f.parsed.ForceTarget, f.parsed.ForceRuntime
+	r, recorded := fr.Find(f.records, info.ref)
+	if !forced && recorded {
+		target, forced = r.Target, true
+	}
+	var it item
+	var err error
+	if forced {
+		var ok bool
+		if it, ok, err = f.newItem(arg, upstream, info, target); err != nil {
+			return it, 1, err
+		}
+		if !ok {
+			f.note("%s: upstream is already on %s, not forcing", idOf(info.ref), it.res.Original)
+			it.runtimePatch = recorded
+		}
+	} else if it, err = f.plainItem(arg, upstream, info); err != nil {
+		return it, 1, err
+	}
+	if hasExtra {
+		it.method = fr.MethodReexport
+	}
+	reps, code, err := f.replacements(it)
+	if err != nil {
+		return it, code, err
+	}
+	it.extra = extradata.Merge(it.extra, reps)
+	return it, 0, nil
+}
+
+// replacements works out the sources f.specs replace in the app of it
+// (extradata.Choose) and downloads the new files, which gives their
+// checksums and sizes; a dry run only says what it would download.
+func (f *forceFlow) replacements(it item) ([]extradata.Replacement, int, error) {
+	sources, _ := metadata.Parse(it.metadata, it.ref)
+	chosen := make([]metadata.Source, len(f.specs))
+	for i, spec := range f.specs {
+		src, auto, err := extradata.Choose(sources, spec)
+		if err != nil {
+			return nil, 2, fmt.Errorf("%s: %w", idOf(it.ref), err)
+		}
+		for j := range i {
+			if chosen[j].Name == src.Name {
+				return nil, 2, fmt.Errorf("%s: %s and %s both replace %s", idOf(it.ref), f.specs[j].URL, spec.URL, src.Name)
+			}
+		}
+		chosen[i] = src
+		if auto {
+			f.note("Using source %s (%s → %s)", src.Name, src.URI, spec.URL)
+		}
+	}
+	var out []extradata.Replacement
+	for i, spec := range f.specs {
+		src := chosen[i]
+		if f.dryRun {
+			f.dry("download %s as %s of %s, instead of %s", spec.URL, src.Name, idOf(it.ref), src.URI)
+			out = append(out, extradata.Replacement{Name: src.Name, File: extradata.File{URL: spec.URL, SHA256: "<sha256 of " + src.Name + ">"}, Base: extradata.FileOf(src)})
+			continue
+		}
+		got, err := f.fetchExtra(spec.URL, src.Name)
+		if err != nil {
+			return nil, 1, fmt.Errorf("downloading %s: %w", spec.URL, err)
+		}
+		out = append(out, extradata.Replacement{Name: src.Name, File: extradata.FileOf(got), Base: extradata.FileOf(src)})
+	}
+	return out, 0, nil
+}
+
+// fetchExtra downloads a replacement into the extra-data directory, where
+// flatpak finds it when it installs the reexported commit: the transaction
+// that follows reuses it (prefetch) instead of downloading it again.
+func (f *forceFlow) fetchExtra(uri, name string) (metadata.Source, error) {
+	release, _, err := prefetch.LockShared(f.user, true)
+	if err != nil {
+		return metadata.Source{}, err
+	}
+	defer release()
+	cfg := prefetch.NewConfig(f.user, f.version)
+	rep := newReporter(f.stderr, detectTerm(os.Stderr), nil)
+	var src metadata.Source
+	err = nil
+	rep.watch(cfg, func(cfg prefetch.Config) (prefetch.Summary, bool) {
+		cfg.OnStart = func(s metadata.Source) {
+			rep.expect(s)
+			rep.started(s)
+		}
+		cfg.OnDone = func(s metadata.Source, r prefetch.Result) {
+			if r.Status != prefetch.Downloaded {
+				// No "flatpak will download it": the caller fails.
+				r.Status = prefetch.Canceled
+			}
+			rep.done(s, r)
+		}
+		var dir string
+		src, dir, err = prefetch.New(cfg).Fetch(f.ctx, uri, name)
+		if err != nil {
+			// The error is the caller's to report.
+			return prefetch.Summary{}, true
+		}
+		if dir != "" {
+			f.fetched = append(f.fetched, dir)
+		}
+		return prefetch.Summary{Downloaded: 1, Dirs: []string{dir}}, false
+	})
+	return src, err
+}
+
+// install is rpak install with --force-runtime or --extra-data, or with
+// records.
 func (f *forceFlow) install() int {
-	forced := f.parsed.ForceRuntime
+	forced := f.parsed.ForceRuntime || len(f.specs) > 0
 	f.dropStale()
-	if !forced && len(f.records) == 0 {
+	if !forced && !f.hasPatches() {
 		return f.normal()
 	}
 	user := f.userRemotes()
@@ -567,17 +940,17 @@ func (f *forceFlow) install() int {
 	switch {
 	case remote == "":
 		if forced {
-			return f.fail(2, "install --force-runtime needs the REMOTE: rpak install --force-runtime REMOTE REF...")
+			return f.fail(2, "install %s needs the REMOTE: rpak install %s REMOTE REF...", f.given(), f.given())
 		}
 		return f.normal()
 	case f.parsed.ExplicitInstallation && !f.userOnlyOption():
 		if forced {
-			return f.fail(2, "--force-runtime only works for the user installation (--user)")
+			return f.fail(2, "%s only works for the user installation (--user)", f.given())
 		}
 		return f.normal()
 	case !userHas:
 		if forced {
-			return f.fail(2, "--force-runtime only works for the user installation, which has no remote %s", remote)
+			return f.fail(2, "%s only works for the user installation, which has no remote %s", f.given(), remote)
 		}
 		return f.normal()
 	case !f.parsed.ExplicitInstallation && inSystem(remote):
@@ -596,12 +969,18 @@ func (f *forceFlow) install() int {
 		}
 		return f.normal()
 	}
+	if len(f.specs) > 0 && len(refs) != 1 {
+		return f.fail(2, "%s replaces the extra-data of one app at a time", extradata.Option)
+	}
 	if !forced {
-		// Only refs with a record are forced: look no further if none of
+		// Only refs with a record are patched: look no further if none of
 		// the arguments can be one of them.
 		relevant := false
 		for _, ref := range refs {
 			for _, r := range f.records {
+				relevant = relevant || plan.Matches(r.Ref, ref)
+			}
+			for _, r := range f.extras {
 				relevant = relevant || plan.Matches(r.Ref, ref)
 			}
 		}
@@ -623,8 +1002,29 @@ func (f *forceFlow) install() int {
 			plain = append(plain, item{arg: arg})
 			continue
 		}
+		if !strings.HasPrefix(info.ref, "app/") {
+			if forced {
+				return f.fail(2, "%s is not an app; only apps can be patched", info.ref)
+			}
+			plain = append(plain, item{arg: arg})
+			continue
+		}
+		_, hasExtra := fr.FindExtra(f.extras, info.ref)
+		if len(f.specs) > 0 || (!f.parsed.ForceRuntime && hasExtra) {
+			// Replacing extra-data, or keeping them replaced.
+			it, code, err := f.extraItem(arg, remote, info)
+			if err != nil {
+				return f.fail(code, "%v", err)
+			}
+			if len(it.extra) == 0 && !it.res.Forced {
+				plain = append(plain, item{arg: arg})
+				continue
+			}
+			items = append(items, it)
+			continue
+		}
 		target := f.parsed.ForceTarget
-		if !forced {
+		if !f.parsed.ForceRuntime {
 			r, ok := fr.Find(f.records, info.ref)
 			if !ok {
 				plain = append(plain, item{arg: arg})
@@ -632,18 +1032,11 @@ func (f *forceFlow) install() int {
 			}
 			target = r.Target
 		}
-		if !strings.HasPrefix(info.ref, "app/") {
-			if forced {
-				return f.fail(2, "%s is not an app; only apps can be forced", info.ref)
-			}
-			plain = append(plain, item{arg: arg})
-			continue
-		}
 		it, ok, err := f.newItem(arg, remote, info, target)
 		if err != nil {
 			return f.fail(1, "%s: %v", info.ref, err)
 		}
-		if !ok {
+		if !ok && len(it.extra) == 0 {
 			f.note("%s: upstream is already on %s, not forcing", idOf(info.ref), it.res.Original)
 			plain = append(plain, item{arg: arg})
 			continue
@@ -653,33 +1046,38 @@ func (f *forceFlow) install() int {
 	return f.apply(remote, addUser, items, plain, nil)
 }
 
-// update is rpak update with --force-runtime REF..., or with records.
+// update is rpak update with --force-runtime REF... or --extra-data REF,
+// or with records.
 func (f *forceFlow) update() int {
-	forced := f.parsed.ForceRuntime
+	forced := f.parsed.ForceRuntime || len(f.specs) > 0
 	userInvolved := !f.parsed.ExplicitInstallation
 	for _, inst := range f.parsed.Installations {
 		userInvolved = userInvolved || inst == args.User
 	}
 	if forced {
 		if f.parsed.ExplicitInstallation && !f.userOnlyOption() {
-			return f.fail(2, "--force-runtime only works for the user installation (--user)")
+			return f.fail(2, "%s only works for the user installation (--user)", f.given())
 		}
 		if len(f.parsed.Positionals) == 0 {
-			return f.fail(2, "update --force-runtime needs the apps to force: rpak update --force-runtime REF...")
+			return f.fail(2, "update %s needs the apps to patch: rpak update %s REF...", f.given(), f.given())
 		}
 	}
 	if !userInvolved {
 		return f.normal()
 	}
 	f.dropStale()
-	if !forced && len(f.records) == 0 {
+	if !forced && !f.hasPatches() {
 		return f.normal()
 	}
 
 	var items []item
 	moving := map[string]bool{} // arguments of apps reinstalled from rpak-local
+	// pending are apps given --extra-data that come from rpak-local: their
+	// export cannot wait for the records, which they are not in yet.
+	var pending []item
 	if forced {
 		installed := fr.Installed(f.user, "app")
+		var all []string
 		for _, arg := range f.parsed.Positionals {
 			var refs []string
 			for _, ref := range installed {
@@ -690,22 +1088,44 @@ func (f *forceFlow) update() int {
 			if len(refs) == 0 {
 				return f.fail(1, "%s is not an app installed in the user installation", arg)
 			}
-			for _, ref := range refs {
+			all = append(all, refs...)
+		}
+		if len(f.specs) > 0 && len(all) != 1 {
+			return f.fail(2, "%s replaces the extra-data of one app at a time", extradata.Option)
+		}
+		for _, arg := range f.parsed.Positionals {
+			for _, ref := range all {
+				if !plan.Matches(ref, arg) {
+					continue
+				}
 				d, _, err := fr.Active(f.user, ref)
 				if err != nil {
 					return f.fail(1, "%s: %v", ref, err)
 				}
 				upstream := d.Origin
 				if upstream == fr.RemoteName {
-					r, ok := fr.Find(f.records, ref)
+					remote, _, ok := f.upstreamOf(ref)
 					if !ok {
 						return f.fail(1, "%s comes from %s but rpak has no record of its remote; reinstall it from its remote first", ref, fr.RemoteName)
 					}
-					upstream = r.Remote
+					upstream = remote
 				}
 				info, err := f.remoteInfo(upstream, ref)
 				if err != nil {
 					return f.fail(1, "%s: %v", ref, err)
+				}
+				if len(f.specs) > 0 {
+					it, code, err := f.extraItem(arg, upstream, info)
+					if err != nil {
+						return f.fail(code, "%v", err)
+					}
+					if it.fromLocal {
+						pending = append(pending, it)
+					} else {
+						items = append(items, it)
+						moving[arg] = true
+					}
+					continue
 				}
 				it, ok, err := f.newItem(arg, upstream, info, f.parsed.ForceTarget)
 				if err != nil {
@@ -739,8 +1159,9 @@ func (f *forceFlow) update() int {
 	}
 
 	// Reexported apps installed from rpak-local get a new export when
-	// upstream has a new commit or the target resolves to another runtime;
-	// flatpak update then finds it.
+	// upstream has a new commit, the target resolves to another runtime or
+	// an extra-data patch went; flatpak update then finds it. An app left
+	// with no patch at all goes back to its remote.
 	selected := f.parsed.Positionals
 	if forced {
 		selected = nil
@@ -750,58 +1171,140 @@ func (f *forceFlow) update() int {
 			}
 		}
 	}
-	var stale []item
-	for _, r := range f.records {
-		if r.Method != fr.MethodReexport || !plan.MatchesAny(r.Ref, f.parsed.Positionals) {
+	stale := append([]item(nil), pending...)
+	for _, ref := range f.reexported() {
+		if !plan.MatchesAny(ref, f.parsed.Positionals) {
 			continue
 		}
-		d, ok, _ := fr.Active(f.user, r.Ref)
+		if _, ok := findItem(append(items, pending...), ref); ok {
+			continue
+		}
+		it, ok := f.refresh(ref, items)
 		if !ok {
 			continue
 		}
-		if d.Origin != fr.RemoteName {
-			if _, ok := findItem(items, r.Ref); !ok {
-				f.warn("%s is installed from %s, not %s, so its runtime is not forced; \"rpak update --force-runtime=%s %s\" forces it again", idOf(r.Ref), d.Origin, fr.RemoteName, r.Target, idOf(r.Ref))
-			}
-			continue
+		m, exported := fr.Exported(f.user, ref)
+		_, hasRemote := fr.FindRemote(f.user, fr.RemoteName)
+		switch refreshAction(it, m, exported, hasRemote) {
+		case goBack:
+			f.back = append(f.back, it)
+		case reexport:
+			stale = append(stale, it)
 		}
-		info, err := f.remoteInfo(r.Remote, r.Ref)
-		if err != nil {
-			f.warn("%s: cannot look at upstream %s, keeping what is exported: %v", idOf(r.Ref), r.Remote, err)
-			continue
-		}
-		it, ok, err := f.newItem(idOf(r.Ref), r.Remote, info, r.Target)
-		if err != nil {
-			f.warn("%s: %v", r.Ref, err)
-			continue
-		}
-		if !ok {
-			f.note("%s: upstream is now on %s itself; \"rpak patch --reset %s\" goes back to %s", idOf(r.Ref), it.res.Original, idOf(r.Ref), r.Remote)
-		}
-		upstream, runtime, exported := fr.Exported(f.user, r.Ref)
-		if exported && upstream == info.commit && runtime == it.res.Runtime.String() {
-			if _, ok := fr.FindRemote(f.user, fr.RemoteName); ok {
-				continue
-			}
-		}
-		stale = append(stale, it)
 	}
 	if len(stale) > 0 {
 		if err := f.export(stale); err != nil {
+			if len(pending) > 0 {
+				return f.fail(1, "%v", err)
+			}
 			f.warn("%v; updating the reexported apps from what is exported", err)
 			stale = nil
 		}
 		for _, it := range stale {
-			r, _ := fr.Find(f.records, it.ref)
-			r.Upstream, r.Original, r.Runtime = it.commit, it.res.Original.String(), it.res.Runtime.String()
-			f.records = fr.Set(f.records, r)
-			f.announce(it.ref, it.res.Original, it.res.Runtime)
+			if it.runtimePatch {
+				r, _ := fr.Find(f.records, it.ref)
+				if r.Ref == "" {
+					r = reexportRecord(it)
+				}
+				r.Upstream, r.Original, r.Runtime = it.commit, it.res.Original.String(), it.res.Runtime.String()
+				f.records = fr.Set(f.records, r)
+			}
+			f.extras = fr.SetExtra(f.extras, fr.ExtraRecord{Ref: it.ref, Remote: it.upstream, Upstream: it.commit, Sources: it.extra})
+			f.announceItem(it)
 		}
 	}
 	if forced && len(selected) == 0 {
 		return f.apply("", false, items, nil, []string{})
 	}
 	return f.apply("", false, items, nil, selected)
+}
+
+// What becomes of a reexported app for upstream's latest commit, see
+// refreshAction.
+const (
+	keepExport = iota // what is exported is what the patches want
+	reexport          // export anew: upstream, the runtime or the extra-data changed
+	goBack            // no patch left: install it from upstream again
+)
+
+// refreshAction decides what becomes of a reexported app, it being what
+// its patches make of upstream's latest commit (its extra-data
+// replacements already carried over, extradata.Carry), m what its export
+// says it was made of (exported false: there is none), hasRemote whether
+// rpak-local is configured. A force-runtime patch keeps the app on
+// rpak-local even when its extra-data patches went.
+func refreshAction(it item, m fr.Mark, exported, hasRemote bool) int {
+	switch {
+	case !it.runtimePatch && len(it.extra) == 0:
+		return goBack
+	case exported && hasRemote && m.Equal(it.job().Mark()):
+		return keepExport
+	}
+	return reexport
+}
+
+// reexported lists the apps rpak reexports: those with a force-runtime
+// record of method reexport or an extra-data record, sorted.
+func (f *forceFlow) reexported() []string {
+	var refs []string
+	for _, r := range f.records {
+		if r.Method == fr.MethodReexport {
+			refs = append(refs, r.Ref)
+		}
+	}
+	for _, r := range f.extras {
+		if !slices.Contains(refs, r.Ref) {
+			refs = append(refs, r.Ref)
+		}
+	}
+	slices.Sort(refs)
+	return refs
+}
+
+// refresh works out what a reexported app is to be made of now: upstream's
+// latest commit with its recorded patches, those that still apply. ok is
+// false when there is nothing to do: the app is not installed, is masked
+// ("flatpak mask": flatpak would not update it, so rpak does not change
+// what it records either), is not installed from rpak-local (it is not
+// patched now; said so, unless items has it), or upstream cannot be read.
+func (f *forceFlow) refresh(ref string, items []item) (item, bool) {
+	d, ok, _ := fr.Active(f.user, ref)
+	if !ok || fr.Masked(f.user, ref) {
+		return item{}, false
+	}
+	r, hasRT := fr.Find(f.records, ref)
+	hasRT = hasRT && r.Method == fr.MethodReexport
+	remote, _, _ := f.upstreamOf(ref)
+	if d.Origin != fr.RemoteName {
+		if _, ok := findItem(items, ref); !ok {
+			if hasRT {
+				f.warn("%s is installed from %s, not %s, so its runtime is not forced; \"rpak update --force-runtime=%s %s\" forces it again", idOf(ref), d.Origin, fr.RemoteName, r.Target, idOf(ref))
+			} else {
+				f.warn("%s is installed from %s, not %s, so its extra-data are upstream's; \"rpak patch %s=URL %s\" replaces them again", idOf(ref), d.Origin, fr.RemoteName, extradata.Option, idOf(ref))
+			}
+		}
+		return item{}, false
+	}
+	info, err := f.remoteInfo(remote, ref)
+	if err != nil {
+		f.warn("%s: cannot look at upstream %s, keeping what is exported: %v", idOf(ref), remote, err)
+		return item{}, false
+	}
+	var it item
+	if hasRT {
+		it, ok, err = f.newItem(idOf(ref), remote, info, r.Target)
+		if err == nil && !ok {
+			f.note("%s: upstream is now on %s itself; \"rpak patch --reset=%s %s\" goes back to %s", idOf(ref), it.res.Original, fr.Kind, idOf(ref), remote)
+		}
+	} else {
+		it, err = f.plainItem(idOf(ref), remote, info)
+	}
+	if err != nil {
+		f.warn("%s: %v", ref, err)
+		return item{}, false
+	}
+	it.method = fr.MethodReexport
+	return it, true
 }
 
 func findItem(items []item, ref string) (item, bool) {
@@ -861,10 +1364,7 @@ func (f *forceFlow) apply(remote string, addUser bool, items, plain []item, upda
 		if code == 0 {
 			for _, it := range items {
 				if it.method == fr.MethodPatch {
-					f.records = fr.Set(f.records, fr.Record{
-						Ref: it.ref, Target: it.target, Remote: it.upstream, Method: fr.MethodPatch,
-						Original: it.res.Original.String(), Runtime: it.res.Original.String(),
-					})
+					f.recordItem(it)
 				}
 			}
 		}
@@ -905,18 +1405,59 @@ func (f *forceFlow) apply(remote string, addUser bool, items, plain []item, upda
 		code = f.runLocal("install", f.cmdArgv("install", a...))
 		if code == 0 {
 			for _, it := range toInstall {
-				f.records = fr.Set(f.records, reexportRecord(it))
-				f.announce(it.ref, it.res.Original, it.res.Runtime)
+				f.recordItem(it)
+				f.announceItem(it)
 			}
 		}
+	}
+	var back []string
+	if code == 0 && len(f.back) > 0 {
+		back, code = f.backUpstream(opts)
 	}
 	// Also after a failure: what flatpak did deploy is patched.
 	f.repatch()
 	f.save()
+	if len(back) > 0 {
+		f.unexport(back)
+	}
 	if noDeps {
 		f.fillRuntimes()
 	}
 	return code
+}
+
+// backUpstream installs the apps of f.back from their upstream remotes
+// again, as reset does, and forgets their extra-data patches once that
+// worked: upstream replaced the sources they replaced, nothing is patched
+// any more. It returns the refs back upstream, to unexport.
+func (f *forceFlow) backUpstream(opts []string) ([]string, int) {
+	var records []fr.Record
+	for _, it := range f.back {
+		records = append(records, fr.Record{Ref: it.ref, Remote: it.upstream})
+	}
+	a := installOptions(opts)
+	a = slices.DeleteFunc(a, func(o string) bool { return o == args.User || o == "-u" || o == "--reinstall" })
+	code := 0
+	var back []string
+	for _, c := range resetCommands(records, a) {
+		argv := f.cmdArgv(c.argv[0], c.argv[1:]...)
+		if f.dryRun {
+			f.dryCmd(argv)
+		} else if c := f.runTransaction("install", argv); c != 0 {
+			code = c
+			continue
+		}
+		for _, r := range c.records {
+			f.extras = fr.RemoveExtra(f.extras, r.Ref)
+			back = append(back, r.Ref)
+			if f.dryRun {
+				f.dry("install %s from %s again: no patch left", idOf(r.Ref), r.Remote)
+			} else {
+				f.note("%s comes from %s again: no patch left", idOf(r.Ref), r.Remote)
+			}
+		}
+	}
+	return back, code
 }
 
 // patchSelected reports whether an update with these REF arguments may
@@ -1111,13 +1652,23 @@ func idOf(ref string) string {
 	return ref
 }
 
+// exportText says what an export changes: "runtime R", "extra-data NAME",
+// both.
+func exportText(it item) string {
+	parts := []string{"runtime " + it.res.Runtime.String()}
+	for _, e := range it.extra {
+		parts = append(parts, fr.ExtraKind+" "+e.Name)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // export reexports the items into the local repository and makes sure its
 // remote is there, adding it the first time.
 func (f *forceFlow) export(items []item) error {
 	if f.dryRun {
 		for _, it := range items {
-			f.dry("reexport %s %s from %s with runtime %s into %s", idOf(it.ref), it.commit[:12], it.upstream, it.res.Runtime, fr.RepoPath(f.user))
-			f.dryCmd(fr.ExportPreview(f.user, it.ref, it.commit, it.res))
+			f.dry("reexport %s %s from %s with %s into %s", idOf(it.ref), it.commit[:12], it.upstream, exportText(it), fr.RepoPath(f.user))
+			f.dryCmd(fr.ExportPreview(f.user, it.job()))
 		}
 		f.dryCmd(fr.PublishArgv(f.user))
 		if _, ok := fr.FindRemote(f.user, fr.RemoteName); !ok {
@@ -1140,8 +1691,8 @@ func (f *forceFlow) export(items []item) error {
 			}
 			srcs[it.upstream] = src
 		}
-		f.note("reexporting %s %s from %s with runtime %s", idOf(it.ref), it.commit[:12], it.upstream, it.res.Runtime)
-		if err := fr.Export(f.ctx, f.query, f.user, src, it.ref, it.commit, it.res); err != nil {
+		f.note("reexporting %s %s from %s with %s", idOf(it.ref), it.commit[:12], it.upstream, exportText(it))
+		if err := fr.Export(f.ctx, f.query, f.user, src, it.job()); err != nil {
 			return fmt.Errorf("reexporting %s: %w", it.ref, err)
 		}
 	}
@@ -1214,18 +1765,20 @@ func (f *forceFlow) updateSplit(opts, updateArgs []string) int {
 	return code
 }
 
-// patchForceRuntime is rpak patch --force-runtime[=TARGET] APP...: the
-// installed apps of the user installation are forced as they are, without
-// updating them. A patched app is rewritten in place; an app with
-// extra-data has the commit it has installed reexported, and is
-// reinstalled from rpak-local (or updated there, if it comes from it
-// already).
-func patchForceRuntime(version string, globals, opts, apps []string, target string, stderr io.Writer) int {
-	if err := fr.ValidTarget(target); err != nil {
-		fmt.Fprintf(stderr, "rpak: %v\n", err)
-		return 2
+// patchApps is rpak patch --force-runtime[=TARGET] and/or
+// --extra-data=[NAME=]URL APP...: the installed apps of the user
+// installation are patched as they are, without updating them. A patched
+// app is rewritten in place; an app with extra-data has the commit it has
+// installed reexported, and is reinstalled from rpak-local (or updated
+// there, if it comes from it already).
+func patchApps(version string, globals, opts, apps []string, force bool, target string, extra []string, stderr io.Writer) int {
+	if force {
+		if err := fr.ValidTarget(target); err != nil {
+			fmt.Fprintf(stderr, "rpak: %v\n", err)
+			return 2
+		}
 	}
-	parsed := args.Parsed{Command: "patch", Positionals: apps, ForceRuntime: true, ForceTarget: target,
+	parsed := args.Parsed{Command: "patch", Positionals: apps, ForceRuntime: force, ForceTarget: target, ExtraData: extra,
 		Installations: []string{args.User}, ExplicitInstallation: true}
 	argv := append(append(append([]string(nil), globals...), "patch"), opts...)
 	f, code, ok := newForceFlow(version, "patch", argv, len(globals), parsed, stderr)
@@ -1237,43 +1790,56 @@ func patchForceRuntime(version string, globals, opts, apps []string, target stri
 	f.dropStale()
 
 	installed := fr.Installed(f.user, "app")
-	var items []item
+	var all []string
 	for _, arg := range apps {
-		var refs []string
+		n := len(all)
 		for _, ref := range installed {
-			if plan.Matches(ref, arg) {
-				refs = append(refs, ref)
+			if plan.Matches(ref, arg) && !slices.Contains(all, ref) {
+				all = append(all, ref)
 			}
 		}
-		if len(refs) == 0 {
+		if len(all) == n {
 			return f.fail(1, "%s is not an app installed in the user installation", arg)
 		}
-		for _, ref := range refs {
-			info, upstream, err := f.installedInfo(ref)
+	}
+	if len(f.specs) > 0 && len(all) != 1 {
+		return f.fail(2, "%s replaces the extra-data of one app at a time", extradata.Option)
+	}
+	var items []item
+	for _, ref := range all {
+		info, upstream, err := f.installedInfo(ref)
+		if err != nil {
+			return f.fail(1, "%s: %v", ref, err)
+		}
+		if len(f.specs) > 0 {
+			it, code, err := f.extraItem(idOf(ref), upstream, info)
 			if err != nil {
-				return f.fail(1, "%s: %v", ref, err)
+				return f.fail(code, "%v", err)
 			}
-			it, ok, err := f.newItem(arg, upstream, info, target)
-			if err != nil {
-				return f.fail(1, "%s: %v", ref, err)
-			}
-			r, had := fr.Find(f.records, ref)
-			if !ok {
-				f.note("%s: it is built for %s already, not forcing", idOf(ref), it.res.Original)
-				if !had {
-					continue
-				}
-			}
-			if it.method == fr.MethodReexport && ok {
-				items = append(items, it)
+			items = append(items, it)
+			continue
+		}
+		it, ok, err := f.newItem(idOf(ref), upstream, info, target)
+		if err != nil {
+			return f.fail(1, "%s: %v", ref, err)
+		}
+		r, had := fr.Find(f.records, ref)
+		if !ok {
+			f.note("%s: it is built for %s already, not forcing", idOf(ref), it.res.Original)
+			if !had {
 				continue
 			}
-			// Patched in place below (repatch); a target that is no
-			// upgrade puts the app back as built.
-			r.Ref, r.Target, r.Remote, r.Method = ref, it.target, upstream, it.method
-			r.Original, r.Runtime = it.res.Original.String(), it.res.Original.String()
-			f.records = fr.Set(f.records, r)
 		}
+		if it.method == fr.MethodReexport && (ok || len(it.extra) > 0) {
+			it.runtimePatch = ok || had
+			items = append(items, it)
+			continue
+		}
+		// Patched in place below (repatch); a target that is no
+		// upgrade puts the app back as built.
+		r.Ref, r.Target, r.Remote, r.Method = ref, it.target, upstream, it.method
+		r.Original, r.Runtime = it.res.Original.String(), it.res.Original.String()
+		f.records = fr.Set(f.records, r)
 	}
 	return f.applyPatch(items)
 }
@@ -1290,27 +1856,27 @@ func (f *forceFlow) installedInfo(ref string) (remoteRef, string, error) {
 		text, err := fr.CommitMetadata(f.user, d.Commit)
 		return remoteRef{ref: ref, commit: d.Commit, metadata: text}, d.Origin, err
 	}
-	r, ok := fr.Find(f.records, ref)
-	if !ok || r.Upstream == "" {
+	remote, upstream, ok := f.upstreamOf(ref)
+	if !ok || upstream == "" {
 		return remoteRef{}, "", fmt.Errorf("it comes from %s but rpak has no record of where from; reinstall it from its remote", fr.RemoteName)
 	}
-	rem, ok := f.userRemotes()[r.Remote]
+	rem, ok := f.userRemotes()[remote]
 	if !ok {
-		return remoteRef{}, "", fmt.Errorf("the user installation has no remote %s", r.Remote)
+		return remoteRef{}, "", fmt.Errorf("the user installation has no remote %s", remote)
 	}
 	src, err := ostree.NewSource(rem.URL, prefetch.NewHTTPClient(), prefetch.UserAgent(f.version))
 	if err != nil {
 		return remoteRef{}, "", err
 	}
-	c, err := ostree.ReadCommit(f.ctx, src, r.Upstream)
+	c, err := ostree.ReadCommit(f.ctx, src, upstream)
 	if err != nil {
 		return remoteRef{}, "", err
 	}
 	text, ok, err := c.MetadataString("xa.metadata")
 	if err == nil && !ok {
-		err = fmt.Errorf("upstream's commit %s has no metadata", r.Upstream[:12])
+		err = fmt.Errorf("upstream's commit %s has no metadata", upstream[:12])
 	}
-	return remoteRef{ref: ref, commit: r.Upstream, metadata: text}, r.Remote, err
+	return remoteRef{ref: ref, commit: upstream, metadata: text}, remote, err
 }
 
 // applyPatch finishes rpak patch: the reexported apps are exported, then
@@ -1321,8 +1887,8 @@ func (f *forceFlow) applyPatch(items []item) int {
 	var export, reinstall, update []item
 	for _, it := range items {
 		if it.fromLocal {
-			if up, rt, ok := fr.Exported(f.user, it.ref); ok && up == it.commit && rt == it.res.Runtime.String() {
-				f.records = fr.Set(f.records, reexportRecord(it))
+			if m, ok := fr.Exported(f.user, it.ref); ok && m.Equal(it.job().Mark()) {
+				f.recordItem(it)
 				continue
 			}
 			update = append(update, it)
@@ -1351,8 +1917,8 @@ func (f *forceFlow) applyPatch(items []item) int {
 		code = f.runLocal(cmd, f.cmdArgv(cmd, a...))
 		if code == 0 {
 			for _, it := range its {
-				f.records = fr.Set(f.records, reexportRecord(it))
-				f.announce(it.ref, it.res.Original, it.res.Runtime)
+				f.recordItem(it)
+				f.announceItem(it)
 			}
 		}
 	}

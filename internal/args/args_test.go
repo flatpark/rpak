@@ -262,6 +262,34 @@ func TestForceRuntime(t *testing.T) {
 	}
 }
 
+// TestExtraData: --extra-data takes its value with "=" or as the next
+// argument, may be repeated, and is taken out with its value.
+func TestExtraData(t *testing.T) {
+	argv := []string{"-y", "--extra-data=code.deb=https://example.com/a.deb?x=1", "--force-runtime", "flathub",
+		"--extra-data", "https://example.com/b.tar.xz", "org.example.App", "--", "--extra-data"}
+	p := Parse("install", argv)
+	if want := []string{"code.deb=https://example.com/a.deb?x=1", "https://example.com/b.tar.xz"}; !reflect.DeepEqual(p.ExtraData, want) || len(p.Unknown) != 0 {
+		t.Errorf("parsed %#v", p)
+	}
+	if want := []string{"flathub", "org.example.App", "--extra-data"}; !reflect.DeepEqual(p.Positionals, want) {
+		t.Errorf("positionals %q", p.Positionals)
+	}
+	if !p.ForceRuntime {
+		t.Errorf("--force-runtime lost")
+	}
+	want := []string{"-y", "flathub", "org.example.App", "--", "--extra-data"}
+	if got := StripForceRuntime(argv); !reflect.DeepEqual(got, want) {
+		t.Errorf("stripped %q, want %q", got, want)
+	}
+	if got := Options("install", argv); !reflect.DeepEqual(got, []string{"-y"}) {
+		t.Errorf("options %q", got)
+	}
+	// Without it, nothing changes.
+	if p := Parse("update", []string{"-y", "org.example.App"}); p.ExtraData != nil {
+		t.Errorf("plain: %#v", p)
+	}
+}
+
 func TestOptions(t *testing.T) {
 	got := Options("update", []string{"--commit", "abc", "app", "-uy", "--subpath=/x", "--installation", "extra", "other"})
 	want := []string{"--commit", "abc", "-uy", "--subpath=/x", "--installation", "extra"}

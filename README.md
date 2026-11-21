@@ -115,6 +115,7 @@ User installation
 rpak install --force-runtime[=TARGET] [--user] [OPTION]... REMOTE APP...
 rpak update --force-runtime[=TARGET] [OPTION]... APP...
 rpak patch --force-runtime[=TARGET] [-y] APP...
+rpak install|update|patch --extra-data=[NAME=]URL... [--force-runtime[=TARGET]] [OPTION]... [REMOTE] APP
 rpak patch [--list]
 rpak patch --reset[=PATCH] [-y] APP...
 ```
@@ -145,12 +146,49 @@ app is only ever moved up: if upstream is already on the target or past
 it, nothing is forced. Giving `--force-runtime=TARGET` again for a patched
 app changes its target.
 
+**Experimental too.** `--extra-data=[NAME=]URL` makes an app download its
+extra-data file `NAME` from `URL` instead of where its packagers point:
+a vendor's newer release the manifest has not caught up with, a link that
+went dead, an older release to go back to, a beta. rpak downloads the file
+(once: the install that follows reuses it), takes its checksum and size,
+and installs the app from a commit of upstream's with just that source
+changed; the app's installer script, permissions and files stay
+upstream's. The file is your choice, nobody else checked it:
+
+```
+rpak: Using source code.deb (https://vscode.download.prss.microsoft.com/.../code_1.147.0-1794903003_amd64.deb → https://vscode.download.prss.microsoft.com/.../code_1.148.0-1795000000_amd64.deb)
+rpak: experimental: com.visualstudio.code downloads its extra-data code.deb from https://... (110.2 MB, sha256 ...) instead of https://...; that file is your choice, its packagers did not pick it.
+rpak: Undo: rpak patch --reset=extra-data com.visualstudio.code
+```
+
+- One app at a time; `--extra-data` may be given again for another of its
+  files, and with `--force-runtime` (one export does both).
+- Without `NAME`, rpak takes the app's only extra-data file, or the one
+  whose URL is clearly the closest to `URL`: on the same host, sharing the
+  most leading directories (on github.com, the same owner/repo) and no
+  other as many. A vendor's new release usually sits next to its old one,
+  support files (FlatPark's prebuilt libraries, Debian packages, a JRE) do
+  not. Anything less clear is an error listing the files, `NAME` and URL,
+  so that you say which; rpak never guesses from version numbers.
+- The patch lasts while upstream keeps the file it replaced: when upstream
+  publishes a commit with the same file (it changed something else),
+  `rpak update` applies the patch to it; when upstream changes that file
+  itself (it caught up, or moved on), the patch is dropped and the app
+  comes from its remote again: `rpak: com.example.App: upstream updated
+  NAME, extra-data patch dropped`. To stay on a file, `flatpak mask` the
+  app: neither flatpak nor rpak updates it then.
+- `flatpak info` still shows upstream's version (it comes from the app's
+  metainfo); `rpak patch` and `rpak doctor` show the URL used and
+  upstream's.
+- A failed download changes and records nothing.
+
 rpak remembers what it patched (`rpak patch` lists it, from
 `<user installation>/rpak/patches.json`); later `rpak update` and
 `rpak install` keep it, with or without APP arguments. `rpak patch --reset
-APP` undoes an app's patches (`--reset=force-runtime` just that one; it is
-the only kind so far): rpak forgets them and reinstalls the app from its
-remote as it was built, with its runtime. Only the user installation is
+APP` undoes an app's patches, `--reset=force-runtime` or
+`--reset=extra-data` just one kind: rpak forgets them and reinstalls the
+app from its remote as it was built, or, if the other kind is left,
+reexports it with that one alone. Only the user installation is
 supported.
 
 How it works: flatpak runs an app on the runtime its deployed `metadata`
@@ -163,8 +201,10 @@ itself, checks every object against the checksum the remote's signed
 summary gives, changes the runtime in its metadata and exports it into a
 local repository, `<user installation>/rpak/local-repo`, which flatpak
 installs the app from (method *reexport*, remote `rpak-local`, added when
-first needed and removed with the last such app). The data in `~/.var/app`
-stays where it is.
+first needed and removed with the last such app). `--extra-data` always
+goes that way: what flatpak downloads is in the commit (`[Extra Data]` of
+its metadata, from which `flatpak build-export` makes
+`xa.extra-data-sources`). The data in `~/.var/app` stays where it is.
 
 Things to know:
 

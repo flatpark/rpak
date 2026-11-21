@@ -7,6 +7,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/flatpark/rpak/internal/extradata"
 )
 
 func pref(s string) Pref {
@@ -359,20 +361,24 @@ func TestRuntimeInstalled(t *testing.T) {
 func TestDecideLocalCleanup(t *testing.T) {
 	patch := Record{Ref: "app/a/x86_64/stable", Method: MethodPatch}
 	reexport := Record{Ref: "app/b/x86_64/stable", Method: MethodReexport}
+	extra := ExtraRecord{Ref: "app/c/x86_64/stable"}
 	for _, tc := range []struct {
 		name    string
 		records []Record
+		extra   []ExtraRecord
 		users   []string
 		exists  bool
 		want    LocalCleanup
 	}{
-		{"the last reexport record went", []Record{patch}, nil, true, RemoveLocal},
-		{"no records left at all", nil, nil, true, RemoveLocal},
-		{"a reexport record is left", []Record{patch, reexport}, nil, true, KeepLocal},
-		{"something still comes from rpak-local", []Record{patch}, []string{"app/b/x86_64/stable"}, true, KeepLocalInUse},
-		{"nothing there", nil, nil, false, KeepLocal},
+		{"the last reexport record went", []Record{patch}, nil, nil, true, RemoveLocal},
+		{"no records left at all", nil, nil, nil, true, RemoveLocal},
+		{"a reexport record is left", []Record{patch, reexport}, nil, nil, true, KeepLocal},
+		{"an extra-data record is left", []Record{patch}, []ExtraRecord{extra}, nil, true, KeepLocal},
+		{"only an extra-data record is left", nil, []ExtraRecord{extra}, nil, true, KeepLocal},
+		{"something still comes from rpak-local", []Record{patch}, nil, []string{"app/b/x86_64/stable"}, true, KeepLocalInUse},
+		{"nothing there", nil, nil, nil, false, KeepLocal},
 	} {
-		if got := DecideLocalCleanup(tc.records, tc.users, tc.exists); got != tc.want {
+		if got := DecideLocalCleanup(tc.records, tc.extra, tc.users, tc.exists); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -380,12 +386,31 @@ func TestDecideLocalCleanup(t *testing.T) {
 
 func TestBody(t *testing.T) {
 	sum := strings.Repeat("e", 64)
-	up, rt := ParseBody(Body(sum, pref("org.freedesktop.Platform/x86_64/26.08")))
-	if up != sum || rt != "org.freedesktop.Platform/x86_64/26.08" {
-		t.Errorf("%q %q", up, rt)
+	m := Mark{Upstream: sum, Runtime: "org.freedesktop.Platform/x86_64/26.08"}
+	// Without extra-data, what rpak always wrote.
+	if b := Body(m); b != "rpak.upstream="+sum+"\nrpak.runtime=org.freedesktop.Platform/x86_64/26.08" {
+		t.Errorf("body %q", b)
 	}
-	if up, rt := ParseBody("some upstream body"); up != "" || rt != "" {
-		t.Errorf("%q %q", up, rt)
+	if got := ParseBody(Body(m)); !got.Equal(m) {
+		t.Errorf("%+v", got)
+	}
+	m.ExtraData = []string{"a.deb:" + sum, "b.deb:" + sum}
+	got := ParseBody(Body(m))
+	if !got.Equal(m) {
+		t.Errorf("%+v", got)
+	}
+	got.ExtraData = got.ExtraData[:1]
+	if got.Equal(m) {
+		t.Errorf("Equal ignores the extra-data")
+	}
+	if got := ParseBody("some upstream body"); got.Upstream != "" || got.Runtime != "" || got.ExtraData != nil {
+		t.Errorf("%+v", got)
+	}
+	// The job's mark is what its body says.
+	j := Job{Ref: "app/a/x86_64/stable", Upstream: sum, Runtime: Resolution{Runtime: pref("org.freedesktop.Platform/x86_64/26.08")},
+		ExtraData: []extradata.Replacement{{Name: "b.deb", File: extradata.File{SHA256: sum}}, {Name: "a.deb", File: extradata.File{SHA256: sum}}}}
+	if !ParseBody(Body(j.Mark())).Equal(m) {
+		t.Errorf("job mark %+v", j.Mark())
 	}
 }
 
@@ -415,5 +440,101 @@ func TestPatchesFileKeepsOtherKinds(t *testing.T) {
 	}
 	if rs, _ := Load(dir); len(rs) != 0 {
 		t.Errorf("records left: %+v", rs)
+	}
+}
+
+// TestExtraRecords: extra-data records live beside force-runtime ones
+// in a version 1 file, each kind saved without touching the other; the
+// file goes when neither has any.
+func TestExtraRecords(t *testing.T) {
+	dir := t.TempDir()
+	sum := strings.Repeat("e", 64)
+	// A file as an rpak that only knew force-runtime wrote it.
+	in := `{"version":1,"apps":{"app/a.A/x86_64/stable":{"force-runtime":{"target":"latest","remote":"flathub","method":"reexport","original_runtime":"x/y/1","runtime":"x/y/2","upstream_commit":"c"}}}}`
+	os.MkdirAll(Dir(dir), 0o755)
+	os.WriteFile(RecordsPath(dir), []byte(in), 0o644)
+	if ex, err := LoadExtra(dir); err != nil || len(ex) != 0 {
+		t.Fatalf("%+v %v", ex, err)
+	}
+	rep := extradata.Replacement{Name: "app.deb", File: extradata.File{URL: "https://new/app.deb", SHA256: sum, Size: 2},
+		Base: extradata.File{URL: "https://old/app.deb", SHA256: strings.Repeat("a", 64), Size: 1}}
+	ex := SetExtra(nil, ExtraRecord{Ref: "app/a.A/x86_64/stable", Remote: "flathub", Upstream: "c", Sources: []extradata.Replacement{rep}})
+	ex = SetExtra(ex, ExtraRecord{Ref: "app/b.B/x86_64/stable", Remote: "flathub", Upstream: "d", Sources: []extradata.Replacement{rep}})
+	if err := SaveExtra(dir, ex); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadExtra(dir)
+	if err != nil || len(got) != 2 || got[0].Ref != "app/a.A/x86_64/stable" || got[1].Upstream != "d" || got[0].Sources[0] != rep {
+		t.Fatalf("%+v %v", got, err)
+	}
+	b, _ := os.ReadFile(RecordsPath(dir))
+	for _, want := range []string{`"version": 1`, `"extra-data": {`, `"name": "app.deb"`, `"url": "https://new/app.deb"`, `"sha256": "` + sum + `"`,
+		`"base": {`, `"url": "https://old/app.deb"`, `"upstream_commit": "c"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("file lacks %s:\n%s", want, b)
+		}
+	}
+	if rs, err := Load(dir); err != nil || len(rs) != 1 || rs[0].Method != MethodReexport {
+		t.Errorf("force-runtime: %+v %v", rs, err)
+	}
+	// A record without sources is no record.
+	ex = SetExtra(ex, ExtraRecord{Ref: "app/b.B/x86_64/stable"})
+	if len(ex) != 1 {
+		t.Errorf("SetExtra without sources: %+v", ex)
+	}
+	if _, ok := FindExtra(ex, "app/a.A/x86_64/stable"); !ok {
+		t.Errorf("FindExtra")
+	}
+	ex = RemoveExtra(ex, "app/a.A/x86_64/stable")
+	if err := SaveExtra(dir, ex); err != nil {
+		t.Fatal(err)
+	}
+	if rs, _ := Load(dir); len(rs) != 1 {
+		t.Errorf("force-runtime lost: %+v", rs)
+	}
+	if err := Save(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(RecordsPath(dir)); !os.IsNotExist(err) {
+		t.Errorf("the file is left without patches: %v", err)
+	}
+}
+
+func TestMaskMatches(t *testing.T) {
+	ref := "app/org.rpak.test.Extra/x86_64/stable"
+	for _, c := range []struct {
+		patterns string
+		want     bool
+	}{
+		{"", false},
+		{"org.rpak.test.Extra", true},
+		{"org.rpak.test.Extra/x86_64", true},
+		{"org.rpak.test.Extra/x86_64/stable", true},
+		{"org.rpak.test.Extra//stable", true},
+		{"app/org.rpak.test.Extra", true},
+		{"runtime/org.rpak.test.Extra", false},
+		{"org.rpak.test.*", true},
+		{"org.rpak.*;", true},
+		{"org.other.App;org.rpak.test.Extra", true},
+		{"org.rpak.test", false},
+		{"org.rpak.test.Extra2", false},
+		{"org.rpak.test.Extra/aarch64", false},
+		{"org.rpak.test.Extra/x86_64/beta", false},
+		{"org.rpak.test.Extra/", false}, // an empty arch, as flatpak reads it
+		{"org.rpak.test.Extra/x/y/z", false},
+		{"org.rpak.test.Ex+ra", false},
+	} {
+		if got := MaskMatches(c.patterns, ref); got != c.want {
+			t.Errorf("%q: %v", c.patterns, got)
+		}
+	}
+	inst := t.TempDir()
+	os.MkdirAll(filepath.Join(inst, "repo"), 0o755)
+	if Masked(inst, ref) {
+		t.Errorf("masked without a config")
+	}
+	os.WriteFile(filepath.Join(inst, "repo", "config"), []byte("[core]\nrepo_version=1\nmode=bare-user-only\nxa.masked=org.rpak.test.Extra\n\n[remote \"a\"]\nurl=x\n"), 0o644)
+	if !Masked(inst, ref) || Masked(inst, "app/org.rpak.test.Plain/x86_64/stable") {
+		t.Errorf("Masked")
 	}
 }

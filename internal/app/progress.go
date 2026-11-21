@@ -112,6 +112,25 @@ func newReporter(w io.Writer, t term, sources []metadata.Source) *reporter {
 
 // run downloads sources with cfg, reporting on the way.
 func (r *reporter) run(ctx context.Context, cfg prefetch.Config, sources []metadata.Source) prefetch.Summary {
+	return r.watch(cfg, func(cfg prefetch.Config) (prefetch.Summary, bool) {
+		return prefetch.New(cfg).DownloadAll(ctx, sources), ctx.Err() != nil
+	})
+}
+
+// expect adds a source the reporter was not created with, once its size
+// is known (prefetch.Downloader.Fetch).
+func (r *reporter) expect(s metadata.Source) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.files++
+	r.total += s.Size
+	r.nameWidth = max(r.nameWidth, textWidth(sanitize(s.Name)))
+	r.sizesWidth = max(r.sizesWidth, textWidth(sizePair(s.Size, s.Size)), textWidth(sizePair(r.total, r.total)))
+}
+
+// watch runs download with cfg's callbacks set to report on the way; a
+// canceled one ends without the summary line.
+func (r *reporter) watch(cfg prefetch.Config, download func(prefetch.Config) (prefetch.Summary, bool)) prefetch.Summary {
 	cfg.OnStart = r.started
 	cfg.OnProgress = r.progress
 	cfg.OnDone = r.done
@@ -140,10 +159,10 @@ func (r *reporter) run(ctx context.Context, cfg prefetch.Config, sources []metad
 			}
 		}
 	}()
-	summary := prefetch.New(cfg).DownloadAll(ctx, sources)
+	summary, canceled := download(cfg)
 	close(stop)
 	wg.Wait()
-	r.finish(summary, ctx.Err() != nil, r.now().Sub(start))
+	r.finish(summary, canceled, r.now().Sub(start))
 	return summary
 }
 

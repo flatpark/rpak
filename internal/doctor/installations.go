@@ -370,7 +370,7 @@ func (d *doctor) refsItems(s *builder, in *instInfo) {
 		}
 		note := ""
 		if in.inst.User && rem.Name == fr.RemoteName {
-			note = "  rpak force-runtime's local repository of reexported apps"
+			note = "  rpak patch's local repository of reexported apps"
 		}
 		s.add("remote %s  %s  (priority %s%s)%s", rem.Name, RedactURL(rem.URL), rem.Priority, opts, note)
 	}

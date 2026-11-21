@@ -51,6 +51,12 @@ REMOTE, update and patch the apps. Later installs and updates keep it. The
 apps were not tested on that runtime and may break; "rpak patch --reset
 APP" undoes it, "rpak patch" lists what is patched.
 
+Experimental too: --extra-data=[NAME=]URL (install, update and patch, one
+app at a time) downloads the app's extra-data file NAME from URL instead,
+such as a vendor's newer release or a link that still works, until
+upstream changes that file itself. The file is your choice; "rpak patch
+--reset=extra-data APP" undoes it.
+
 Options:
   -h, --help     show this help
   --version      show the versions of rpak and flatpak
