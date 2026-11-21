@@ -933,6 +933,21 @@ func (f *forceFlow) install() int {
 		_, ok := user[name]
 		return ok || inSystem(name)
 	})
+	// Without REMOTE, as flatpak install does, the remote is the one that
+	// has the refs: rpak looks only at the user installation's, and says
+	// --user itself.
+	picked := false
+	if remote == "" && (!f.parsed.ExplicitInstallation || f.userOnlyOption()) && (forced || f.recorded(refs)) {
+		found, err := f.findRemote(refs)
+		if err != nil {
+			if forced {
+				return f.fail(2, "%v", err)
+			}
+			return f.normal()
+		}
+		f.note("%s: found in the remote %s", strings.Join(refs, ", "), found)
+		remote, picked = found, true
+	}
 	_, userHas := user[remote]
 	// Only the user installation is supported. Without --force-runtime
 	// anything else is simply not forced.
@@ -940,7 +955,7 @@ func (f *forceFlow) install() int {
 	switch {
 	case remote == "":
 		if forced {
-			return f.fail(2, "install %s needs the REMOTE: rpak install %s REMOTE REF...", f.given(), f.given())
+			return f.fail(2, "%s only works for the user installation (--user)", f.given())
 		}
 		return f.normal()
 	case f.parsed.ExplicitInstallation && !f.userOnlyOption():
@@ -953,7 +968,7 @@ func (f *forceFlow) install() int {
 			return f.fail(2, "%s only works for the user installation, which has no remote %s", f.given(), remote)
 		}
 		return f.normal()
-	case !f.parsed.ExplicitInstallation && inSystem(remote):
+	case !f.parsed.ExplicitInstallation && inSystem(remote) && !picked:
 		if forced {
 			return f.fail(2, "%s is a remote of both the user and the system installation; add --user", remote)
 		}
@@ -972,21 +987,10 @@ func (f *forceFlow) install() int {
 	if len(f.specs) > 0 && len(refs) != 1 {
 		return f.fail(2, "%s replaces the extra-data of one app at a time", extradata.Option)
 	}
-	if !forced {
+	if !forced && !f.recorded(refs) {
 		// Only refs with a record are patched: look no further if none of
 		// the arguments can be one of them.
-		relevant := false
-		for _, ref := range refs {
-			for _, r := range f.records {
-				relevant = relevant || plan.Matches(r.Ref, ref)
-			}
-			for _, r := range f.extras {
-				relevant = relevant || plan.Matches(r.Ref, ref)
-			}
-		}
-		if !relevant {
-			return f.normal()
-		}
+		return f.normal()
 	}
 
 	var items, plain []item
@@ -1044,6 +1048,63 @@ func (f *forceFlow) install() int {
 		items = append(items, it)
 	}
 	return f.apply(remote, addUser, items, plain, nil)
+}
+
+// recorded reports whether one of the install arguments can name an app
+// with a patch record.
+func (f *forceFlow) recorded(refs []string) bool {
+	for _, ref := range refs {
+		for _, r := range f.records {
+			if plan.Matches(r.Ref, ref) {
+				return true
+			}
+		}
+		for _, r := range f.extras {
+			if plan.Matches(r.Ref, ref) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findRemote is the remote of the user installation that has all of refs,
+// for an install without REMOTE: there must be exactly one (rpak's own
+// and disabled remotes do not count).
+func (f *forceFlow) findRemote(refs []string) (string, error) {
+	remotes, _ := fr.Remotes(f.user)
+	var found, names []string
+	for _, rem := range remotes {
+		if rem.Disabled || rem.Name == fr.RemoteName {
+			continue
+		}
+		names = append(names, rem.Name)
+		all := len(refs) > 0
+		for _, ref := range refs {
+			if strings.HasPrefix(ref, "-") || args.LocalLocation(ref) {
+				all = false
+				break
+			}
+			if _, err := f.remoteInfo(rem.Name, ref); err != nil {
+				all = false
+				break
+			}
+		}
+		if all {
+			found = append(found, rem.Name)
+		}
+	}
+	what := strings.Join(refs, " ")
+	switch {
+	case len(found) == 1:
+		return found[0], nil
+	case len(found) > 1:
+		return "", fmt.Errorf("%s is in more than one remote of the user installation (%s); say which: rpak install %s REMOTE %s", what, strings.Join(found, ", "), f.given(), what)
+	case len(names) == 0:
+		return "", fmt.Errorf("the user installation has no remote to install %s from", what)
+	default:
+		return "", fmt.Errorf("no remote of the user installation (%s) has %s; rpak install %s REMOTE %s", strings.Join(names, ", "), what, f.given(), what)
+	}
 }
 
 // update is rpak update with --force-runtime REF... or --extra-data REF,

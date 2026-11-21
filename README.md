@@ -123,7 +123,7 @@ User installation
 ### patch (experimental)
 
 ```
-rpak install --force-runtime[=TARGET] [--user] [OPTION]... REMOTE APP...
+rpak install --force-runtime[=TARGET] [--user] [OPTION]... [REMOTE] APP...
 rpak update --force-runtime[=TARGET] [OPTION]... APP...
 rpak patch --force-runtime[=TARGET] [-y] APP...
 rpak install|update|patch --extra-data=[NAME=]URL... [--force-runtime[=TARGET]] [OPTION]... [REMOTE] APP
@@ -144,7 +144,9 @@ nothing about compatibility. Every time it forces an app it says so:
 rpak: experimental: com.example.App was built for org.freedesktop.Platform/x86_64/25.08, now runs on org.freedesktop.Platform/x86_64/26.08; it may break. Undo: rpak patch --reset com.example.App
 ```
 
-- `rpak install --force-runtime REMOTE APP...` installs apps forced;
+- `rpak install --force-runtime [REMOTE] APP...` installs apps forced;
+  without `REMOTE`, from the one remote of the user installation that has
+  them (in more than one: say which);
 - `rpak patch --force-runtime APP...` forces apps that are installed, at the
   version they are;
 - `rpak update --force-runtime APP...` updates apps and forces them.

@@ -46,8 +46,9 @@ repositories involved.
 Experimental: install, update and patch take --force-runtime[=TARGET],
 which makes the apps run on a newer branch of their runtime than they were
 built for (TARGET: latest, the default, a branch such as 26.08, or a
-runtime ID/ARCH/BRANCH); the user installation only, install needs the
-REMOTE, update and patch the apps. Later installs and updates keep it. The
+runtime ID/ARCH/BRANCH); the user installation only, install takes the
+apps (and their REMOTE, unless only one remote has them), update and patch
+the apps. Later installs and updates keep it. The
 apps were not tested on that runtime and may break; "rpak patch --reset
 APP" undoes it, "rpak patch" lists what is patched.
 
