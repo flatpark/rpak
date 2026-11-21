@@ -492,7 +492,7 @@ func TestPatchDryRunReexport(t *testing.T) {
 func TestNewRecordIsAnnounced(t *testing.T) {
 	e := newEnv(t)
 	deployFixture(t, e, "org.rpak.Deploy", "app", true)
-	line := "rpak: experimental: org.rpak.Deploy was built for org.freedesktop.Platform/x86_64/25.08, now runs on org.freedesktop.Platform/x86_64/26.08; it may break. Undo: rpak patch --reset org.rpak.Deploy\n"
+	line := "rpak: experimental: org.rpak.Deploy runs on org.freedesktop.Platform 25.08 → 26.08, untested; it may break.\nrpak: Undo: rpak patch --reset org.rpak.Deploy\n"
 	for i, c := range []struct {
 		target   string
 		announce bool

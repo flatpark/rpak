@@ -494,7 +494,7 @@ forced=$RUNTIME/$arch/$RUNTIME_BRANCH
 for app in org.rpak.test.Plain org.rpak.test.Extra; do
 	rt=$(flatpak info --user "$app" | sed -n 's/^ *Runtime: //p')
 	[ "$rt" = "$forced" ] || fail "$app: flatpak info says runtime $rt"
-	grep -qxF "rpak: experimental: $app was built for $RUNTIME/$arch/$old, now runs on $forced; it may break. Undo: rpak patch --reset $app" /tmp/fr-install.log ||
+	[ "$(grep -xF -A1 "rpak: experimental: $app runs on $RUNTIME $old → $RUNTIME_BRANCH, untested; it may break." /tmp/fr-install.log | tail -1)" = "rpak: Undo: rpak patch --reset $app" ] ||
 		fail "no experimental warning for $app"
 done
 pass "flatpak info: both run on $forced; the experimental warning was printed for both"
@@ -674,7 +674,7 @@ extra2=$FLATPAK_USER_DIR/app/org.rpak.test.Extra2/$arch/stable/active/files/extr
 publish_extra2 2
 rpak patch -y --force-runtime org.rpak.test.Extra2 > /tmp/fr-patch.log 2>&1 || { cat /tmp/fr-patch.log; fail "rpak patch --force-runtime org.rpak.test.Extra2"; }
 grep '^rpak' /tmp/fr-patch.log
-grep -qxF "rpak: experimental: org.rpak.test.Extra2 was built for org.rpak.test.Platform/$arch/1, now runs on org.rpak.test.Platform/$arch/2; it may break. Undo: rpak patch --reset org.rpak.test.Extra2" /tmp/fr-patch.log ||
+[ "$(grep -xF -A1 "rpak: experimental: org.rpak.test.Extra2 runs on org.rpak.test.Platform 1 → 2, untested; it may break." /tmp/fr-patch.log | tail -1)" = "rpak: Undo: rpak patch --reset org.rpak.test.Extra2" ] ||
 	fail "no experimental warning"
 [ "$(flatpak info --user --show-origin org.rpak.test.Extra2)" = rpak-local ] || fail "origin $(flatpak info --user --show-origin org.rpak.test.Extra2)"
 [ "$(cat "$extra2/runtime-version")" = 2 ] || fail "apply_extra ran in $(cat "$extra2/runtime-version")"
@@ -802,7 +802,7 @@ rpak patch -y --force-runtime org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /t
 grep '^rpak' /tmp/xd.log
 [ "$(cat "$xd/extra/runtime-version")" = 2 ] && [ "$(cat "$xd/extra/marker")" = "FRESH 1" ] || fail "runtime $(cat "$xd/extra/runtime-version"), $(cat "$xd/extra/marker")"
 # Plain --reset would undo the replaced payload.txt too.
-grep -qxF "rpak: experimental: org.rpak.test.Extra was built for org.rpak.test.Platform/$arch/1, now runs on org.rpak.test.Platform/$arch/2; it may break. Undo: rpak patch --reset=force-runtime org.rpak.test.Extra" /tmp/xd.log ||
+[ "$(grep -xF -A1 "rpak: experimental: org.rpak.test.Extra runs on org.rpak.test.Platform 1 → 2, untested; it may break." /tmp/xd.log | tail -1)" = "rpak: Undo: rpak patch --reset=force-runtime org.rpak.test.Extra" ] ||
 	fail "the experimental line does not undo force-runtime alone"
 rpak patch | tee /tmp/xd-list.log
 grep -Eq "^org.rpak.test.Extra +org.rpak.test.Platform 1 → 2\$" /tmp/xd-list.log || fail "list: no force-runtime line"
@@ -882,7 +882,7 @@ step "extra-data f: --force-runtime and --extra-data at once, then flatpak outsi
 echo "fresh 4" > "$www/new-4.txt"
 rpak patch -y --force-runtime --extra-data="payload.txt=$url/new-4.txt" org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "both"; }
 grep '^rpak' /tmp/xd.log
-grep -q "^rpak: experimental: org.rpak.test.Extra was built for org.rpak.test.Platform/$arch/1, now runs on org.rpak.test.Platform/$arch/2" /tmp/xd.log &&
+grep -q "^rpak: experimental: org.rpak.test.Extra runs on org.rpak.test.Platform 1 → 2, untested" /tmp/xd.log &&
 	grep -q "^rpak: experimental: org.rpak.test.Extra downloads its extra-data payload.txt from $url/new-4.txt " /tmp/xd.log || fail "not both announced"
 [ "$(cat "$xd/extra/marker")" = "FRESH 4" ] && [ "$(cat "$xd/extra/runtime-version")" = 2 ] && [ "$(origin)" = rpak-local ] || fail "not both applied"
 pass "one rpak patch made both patches"

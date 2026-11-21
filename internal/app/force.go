@@ -276,10 +276,10 @@ func (f *forceFlow) fail(code int, format string, a ...any) int {
 	return code
 }
 
-// experimental is the line printed whenever an app is made to run on
-// another runtime; undo is the --reset that undoes it.
+// experimental is what is printed whenever an app is made to run on
+// another runtime, two lines; undo is the --reset that undoes it.
 func experimental(id string, from, to fr.Pref, undo string) string {
-	return fmt.Sprintf("rpak: experimental: %s was built for %s, now runs on %s; it may break. Undo: rpak patch %s %s", id, from, to, undo, id)
+	return fmt.Sprintf("rpak: experimental: %s runs on %s, untested; it may break.\nrpak: Undo: rpak patch %s %s", id, prefChange(from.String(), to.String()), undo, id)
 }
 
 // announce prints the experimental line of an app, once per run, and not

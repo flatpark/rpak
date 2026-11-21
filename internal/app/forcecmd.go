@@ -220,16 +220,22 @@ func listName(refs []string, i int) string {
 // two runtimes in full; with " (pinned)" when the target is not latest
 // (a branch or runtime given to --force-runtime, which it runs on).
 func runtimeChange(r fr.Record) string {
-	text := r.Original + " → " + r.Runtime
-	from, err1 := fr.ParsePref(r.Original)
-	to, err2 := fr.ParsePref(r.Runtime)
-	if err1 == nil && err2 == nil && from.ID == to.ID && from.Arch == to.Arch {
-		text = from.ID + " " + from.Branch + " → " + to.Branch
-	}
+	text := prefChange(r.Original, r.Runtime)
 	if targetText(r.Target) != fr.Latest {
 		text += " (pinned)"
 	}
 	return text
+}
+
+// prefChange is "ID FROM → TO" when only the branch changes, else the two
+// runtimes in full.
+func prefChange(original, runtime string) string {
+	from, err1 := fr.ParsePref(original)
+	to, err2 := fr.ParsePref(runtime)
+	if err1 == nil && err2 == nil && from.ID == to.ID && from.Arch == to.Arch {
+		return from.ID + " " + from.Branch + " → " + to.Branch
+	}
+	return original + " → " + runtime
 }
 
 func targetText(t string) string {
