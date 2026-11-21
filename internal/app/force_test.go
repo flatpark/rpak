@@ -49,13 +49,19 @@ func TestInstallOptions(t *testing.T) {
 func TestExperimentalLine(t *testing.T) {
 	from, _ := fr.ParsePref("org.freedesktop.Platform/x86_64/25.08")
 	to, _ := fr.ParsePref("org.freedesktop.Platform/x86_64/26.08")
-	want := "rpak: experimental: com.example.App was built for org.freedesktop.Platform/x86_64/25.08, now runs on org.freedesktop.Platform/x86_64/26.08; it may break. Undo: rpak patch --reset com.example.App"
+	want := "rpak: experimental: com.example.App runs on org.freedesktop.Platform 25.08 → 26.08, untested; it may break.\nrpak: Undo: rpak patch --reset com.example.App"
 	if got := experimental("com.example.App", from, to, "--reset"); got != want {
 		t.Errorf("got %q", got)
 	}
 	// With extra-data replaced too, plain --reset would undo that as well.
 	want = strings.Replace(want, "--reset com", "--reset=force-runtime com", 1)
 	if got := experimental("com.example.App", from, to, "--reset=force-runtime"); got != want {
+		t.Errorf("got %q", got)
+	}
+	// Another runtime: both in full.
+	other, _ := fr.ParsePref("org.kde.Platform/x86_64/6.9")
+	want = "rpak: experimental: com.example.App runs on org.freedesktop.Platform/x86_64/25.08 → org.kde.Platform/x86_64/6.9, untested; it may break.\nrpak: Undo: rpak patch --reset com.example.App"
+	if got := experimental("com.example.App", from, other, "--reset"); got != want {
 		t.Errorf("got %q", got)
 	}
 }

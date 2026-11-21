@@ -141,7 +141,8 @@ apps have not been tested on that runtime and may break; rpak checks
 nothing about compatibility. Every time it forces an app it says so:
 
 ```
-rpak: experimental: com.example.App was built for org.freedesktop.Platform/x86_64/25.08, now runs on org.freedesktop.Platform/x86_64/26.08; it may break. Undo: rpak patch --reset com.example.App
+rpak: experimental: com.example.App runs on org.freedesktop.Platform 25.08 → 26.08, untested; it may break.
+rpak: Undo: rpak patch --reset com.example.App
 ```
 
 - `rpak install --force-runtime [REMOTE] APP...` installs apps forced;
