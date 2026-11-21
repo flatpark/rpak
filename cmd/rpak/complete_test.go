@@ -331,6 +331,10 @@ func TestCompleteForceRuntime(t *testing.T) {
 	if out, _ := e.complete(nil, "rpak install --", "15", "--"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n--extra-data=\n" {
 		t.Errorf("install --: %q", out)
 	}
+	// A single "-" is an option too: flatpak offers its options for it.
+	if out, _ := e.complete(nil, "rpak install -", "14", "-"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n--extra-data=\n" {
+		t.Errorf("install -: %q", out)
+	}
 	if out, _ := e.complete(nil, "rpak update --fo", "16", "--fo"); out != "--user \n--no-deps \n--force-runtime \n--force-runtime=\n" {
 		t.Errorf("update --fo: %q", out)
 	}

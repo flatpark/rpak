@@ -31,6 +31,10 @@ bash needs "complete -o nospace -F __rpak flatpak" as well.
 //     which is wrong when completing in the middle of the line. After an
 //     option with "=", the candidates are values, so the part up to the
 //     "=" is set aside (compset) for them to match.
+//     No "emulate -L zsh": it drops the options the completion system
+//     runs functions with (extendedglob, ...), which breaks _path_files,
+//     and the candidates after it then match nothing (install --fo
+//     offered no --force-runtime, and no .flatpak file was offered).
 //   - bash: works without the bash-completion package (_get_cword).
 //   - fish: the cursor is relative to the command, not the whole buffer,
 //     and values are put after the "--option=" of the current token.
@@ -40,8 +44,6 @@ const zshCompletion = `#compdef rpak
 # Put it in a directory in $fpath as _rpak, or source it after compinit.
 
 _rpak() {
-  emulate -L zsh
-
   local index
   (( index = ${#${(j: :)words[1,CURRENT-1]}} + 1 + $#PREFIX ))
 
