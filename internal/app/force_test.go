@@ -135,3 +135,19 @@ func TestRefreshAction(t *testing.T) {
 		t.Errorf("export or remote missing")
 	}
 }
+
+func TestWriteRecords(t *testing.T) {
+	var b strings.Builder
+	writeRecords(&b, []fr.Record{
+		{Ref: "app/org.a.App/x86_64/stable", Original: "org.freedesktop.Platform/x86_64/25.08", Runtime: "org.freedesktop.Platform/x86_64/26.08"},
+		{Ref: "app/org.a.App/x86_64/beta", Target: "26.08", Original: "org.freedesktop.Platform/x86_64/25.08", Runtime: "org.freedesktop.Platform/x86_64/26.08"},
+		{Ref: "app/org.b.App/x86_64/stable", Target: "org.gnome.Platform/x86_64/49", Original: "org.freedesktop.Platform/x86_64/25.08", Runtime: "org.gnome.Platform/x86_64/49"},
+	})
+	want := "App                      Runtime\n" +
+		"org.a.App/x86_64/stable  org.freedesktop.Platform 25.08 → 26.08\n" +
+		"org.a.App/x86_64/beta    org.freedesktop.Platform 25.08 → 26.08 (pinned)\n" +
+		"org.b.App                org.freedesktop.Platform/x86_64/25.08 → org.gnome.Platform/x86_64/49 (pinned)\n"
+	if b.String() != want {
+		t.Errorf("got\n%s\nwant\n%s", b.String(), want)
+	}
+}

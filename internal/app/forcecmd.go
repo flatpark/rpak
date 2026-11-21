@@ -171,27 +171,65 @@ func patchList(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// writeExtraRecords prints the extra-data records as a table: a line per
-// replaced source, with the file it is downloaded from now and upstream's.
+// writeExtraRecords prints the extra-data records: per replaced source,
+// the app and the file's name, then the URL it is downloaded from now and
+// upstream's, each on a line of its own (URLs are long). rpak doctor shows
+// the rest: size, checksum, upstream remote and commit.
 func writeExtraRecords(w io.Writer, records []fr.ExtraRecord) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "App\tPatch\tName\tURL\tUpstream's URL\tRemote")
-	for _, r := range records {
+	refs := make([]string, len(records))
+	for i, r := range records {
+		refs[i] = r.Ref
+	}
+	for i, r := range records {
 		for _, s := range r.Sources {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", strings.TrimPrefix(r.Ref, "app/"), fr.ExtraKind, s.Name, s.URL, s.Base.URL, r.Remote)
+			fmt.Fprintf(w, "%s  %s\n  url       %s\n  upstream  %s\n", listName(refs, i), s.Name, s.URL, s.Base.URL)
 		}
+	}
+}
+
+// writeRecords prints the force-runtime records as a table of app and
+// runtime change. rpak doctor shows the rest: method, upstream remote,
+// and what the deployment runs on now.
+func writeRecords(w io.Writer, records []fr.Record) {
+	refs := make([]string, len(records))
+	for i, r := range records {
+		refs[i] = r.Ref
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "App\tRuntime")
+	for i, r := range records {
+		fmt.Fprintf(tw, "%s\t%s\n", listName(refs, i), runtimeChange(r))
 	}
 	tw.Flush()
 }
 
-// writeRecords prints the records as a table.
-func writeRecords(w io.Writer, records []fr.Record) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "App\tPatch\tBuilt for\tRuns on\tMethod\tRemote\tTarget")
-	for _, r := range records {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", strings.TrimPrefix(r.Ref, "app/"), fr.Kind, r.Original, r.Runtime, r.Method, r.Remote, targetText(r.Target))
+// listName is how the list names refs[i]: its id, enough for rpak patch
+// --reset, unless another of refs has the same id (another arch or
+// branch); then the ref without "app/".
+func listName(refs []string, i int) string {
+	id := idOf(refs[i])
+	for j, ref := range refs {
+		if j != i && ref != refs[i] && idOf(ref) == id {
+			return strings.TrimPrefix(refs[i], "app/")
+		}
 	}
-	tw.Flush()
+	return id
+}
+
+// runtimeChange is "ID FROM → TO" when only the branch changes, else the
+// two runtimes in full; with " (pinned)" when the target is not latest
+// (a branch or runtime given to --force-runtime, which it runs on).
+func runtimeChange(r fr.Record) string {
+	text := r.Original + " → " + r.Runtime
+	from, err1 := fr.ParsePref(r.Original)
+	to, err2 := fr.ParsePref(r.Runtime)
+	if err1 == nil && err2 == nil && from.ID == to.ID && from.Arch == to.Arch {
+		text = from.ID + " " + from.Branch + " → " + to.Branch
+	}
+	if targetText(r.Target) != fr.Latest {
+		text += " (pinned)"
+	}
+	return text
 }
 
 func targetText(t string) string {

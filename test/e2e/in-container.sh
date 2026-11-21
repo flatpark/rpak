@@ -542,11 +542,10 @@ pass "both updated to their new commits and still run on $RUNTIME_BRANCH"
 step "rpak patch (the list)"
 rpak patch | tee /tmp/fr-list.log
 for app in org.rpak.test.Plain org.rpak.test.Extra; do
-	grep -E "^$app/$arch/stable +force-runtime +$RUNTIME/$arch/$old +$forced +(patch|reexport) +upstream +$RUNTIME_BRANCH\$" /tmp/fr-list.log >/dev/null || fail "list: no line for $app"
+	grep -E "^$app +$RUNTIME $old → $RUNTIME_BRANCH \(pinned\)\$" /tmp/fr-list.log >/dev/null || fail "list: no line for $app"
 done
-grep -q "^org.rpak.test.Plain/.* patch " /tmp/fr-list.log && grep -q "^org.rpak.test.Extra/.* reexport " /tmp/fr-list.log || fail "list: methods"
 [ -f "$FLATPAK_USER_DIR/rpak/patches.json" ] || fail "no patches.json"
-pass "rpak patch lists both, methods patch and reexport"
+pass "rpak patch lists both"
 
 step "force-runtime: rpak doctor"
 code=0
@@ -555,6 +554,7 @@ sed -n '/^== Patches/,/^== /p' /tmp/fr-doctor.log
 [ "$code" -eq 0 ] || fail "rpak doctor exited $code"
 grep -qx "== Patches" /tmp/fr-doctor.log || fail "no Patches section"
 grep -q "org.rpak.test.Plain.*force-runtime (method patch).*deployment runs on $forced" /tmp/fr-doctor.log || fail "doctor: patch state of org.rpak.test.Plain"
+grep -q "org.rpak.test.Extra.*force-runtime (method reexport)" /tmp/fr-doctor.log || fail "doctor: method of org.rpak.test.Extra"
 grep -q "installed from rpak-local: app/org.rpak.test.Extra/$arch/stable" /tmp/fr-doctor.log || fail "doctor: apps from rpak-local"
 grep -E "^  forced runtime: " /tmp/fr-doctor.log || fail "doctor: no forced runtime line in the app sections"
 grep -E "^  extra-data payload.txt .*\(upstream remote upstream" /tmp/fr-doctor.log || fail "doctor: the extra-data check of org.rpak.test.Extra is not against upstream"
@@ -686,7 +686,7 @@ step "rpak patch --reset: the last reexported app"
 # goes the way users may go: uninstalled with flatpak, forgotten by rpak.
 flatpak uninstall --user -y --noninteractive org.rpak.test.Extra >/dev/null 2>&1
 rpak patch > /tmp/fr-list.log
-! grep -q '^org.rpak.test.Extra/' /tmp/fr-list.log || fail "org.rpak.test.Extra is still listed"
+! grep -q '^org.rpak.test.Extra ' /tmp/fr-list.log || fail "org.rpak.test.Extra is still listed"
 flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local went while org.rpak.test.Extra2 comes from it"
 state > /tmp/state.before
 RPAK_DRY_RUN=1 rpak patch --reset -y org.rpak.test.Extra2 > /tmp/fr-dry.log 2>&1 || { cat /tmp/fr-dry.log; fail "rpak patch --reset, dry run"; }
@@ -805,8 +805,9 @@ grep '^rpak' /tmp/xd.log
 grep -qxF "rpak: experimental: org.rpak.test.Extra was built for org.rpak.test.Platform/$arch/1, now runs on org.rpak.test.Platform/$arch/2; it may break. Undo: rpak patch --reset=force-runtime org.rpak.test.Extra" /tmp/xd.log ||
 	fail "the experimental line does not undo force-runtime alone"
 rpak patch | tee /tmp/xd-list.log
-grep -Eq "^org.rpak.test.Extra/$arch/stable +force-runtime +org.rpak.test.Platform/$arch/1 +org.rpak.test.Platform/$arch/2 +reexport +upstream +latest\$" /tmp/xd-list.log || fail "list: no force-runtime line"
-grep -Eq "^org.rpak.test.Extra/$arch/stable +extra-data +payload.txt +$url/new-1.txt +$url/xd-10.txt +upstream\$" /tmp/xd-list.log || fail "list: no extra-data line"
+grep -Eq "^org.rpak.test.Extra +org.rpak.test.Platform 1 → 2\$" /tmp/xd-list.log || fail "list: no force-runtime line"
+grep -A2 -x "org.rpak.test.Extra  payload.txt" /tmp/xd-list.log | grep -qxF "  url       $url/new-1.txt" || fail "list: no extra-data url"
+grep -A2 -x "org.rpak.test.Extra  payload.txt" /tmp/xd-list.log | grep -qxF "  upstream  $url/xd-10.txt" || fail "list: no extra-data upstream url"
 pass "both patches at once: apply_extra ran in branch 2 on the new file; rpak patch lists both"
 rpak patch -y --reset=extra-data org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "--reset=extra-data"; }
 grep '^rpak' /tmp/xd.log
@@ -814,7 +815,7 @@ grep '^rpak' /tmp/xd.log
 [ "$(cat "$xd/extra/marker")" = "PAYLOAD 10" ] && [ "$(cat "$xd/extra/runtime-version")" = 2 ] && [ "$(origin)" = rpak-local ] ||
 	fail "after --reset=extra-data: $(cat "$xd/extra/marker"), runtime $(cat "$xd/extra/runtime-version"), from $(origin)"
 [ "$(xrec url)" = none ] || fail "the extra-data record is left"
-rpak patch | grep -q "^org.rpak.test.Extra/.* force-runtime " || fail "the force-runtime patch went too"
+rpak patch | grep -qx "org.rpak.test.Extra  org.rpak.test.Platform 1 → 2" || fail "the force-runtime patch went too"
 pass "--reset=extra-data: upstream's file again, still on branch 2 from rpak-local"
 rpak patch -y --reset org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "--reset"; }
 grep '^rpak' /tmp/xd.log
