@@ -253,7 +253,7 @@ func (c *completion) withForceRuntime(stdout io.Writer) int {
 		return 0
 	}
 	code := c.flatpak(stdout)
-	if strings.HasPrefix(c.cur, "--") {
+	if strings.HasPrefix(c.cur, "-") {
 		for _, candidate := range []string{args.ForceRuntimeOption + " ", args.ForceRuntimeOption + "=", args.ExtraDataOption + "="} {
 			if word, ok := c.completeWord(candidate); ok {
 				fmt.Fprintln(stdout, word)
