@@ -377,27 +377,25 @@ func TestRemoved(t *testing.T) {
 	write(t, filepath.Join(removed, "stray-file"), nil, 0o644)
 
 	// A running instance holds a read lock on its .ref, like bwrap.
-	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Env = append(os.Environ(), "HOLD_REF_LOCK="+filepath.Join(running, "files", ".ref"))
-	stdin, _ := cmd.StdinPipe()
-	stdout, _ := cmd.StdoutPipe()
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { stdin.Close(); cmd.Wait() }()
-	if line, _ := bufio.NewReader(stdout).ReadString('\n'); line != "ready\n" {
-		t.Fatal("lock holder did not start")
-	}
+	cmd, release := holdRefLock(t, filepath.Join(running, "files", ".ref"))
+	defer release()
 
-	var r recorder
-	r.cleaner(true).Removed(inst)
-	if len(r.items) != 1 || !strings.HasSuffix(r.items[0], unused) || !exists(unused) {
-		t.Fatalf("dry run: %q", r.items)
-	}
-	r = recorder{}
-	r.cleaner(false).Removed(inst)
-	if len(r.items) != 1 || exists(unused) {
-		t.Errorf("items %q", r.items)
+	unusedSize := diskUsage(unused)
+	for _, dryRun := range []bool{true, false} {
+		var r recorder
+		c := r.cleaner(dryRun)
+		inUse := c.Removed(inst)
+		if len(r.items) != 1 || !strings.HasSuffix(r.items[0], unused) || exists(unused) == !dryRun {
+			t.Fatalf("dry run %v: %q", dryRun, r.items)
+		}
+		// The one in use is returned, not counted as an item or freed.
+		if len(inUse) != 1 || inUse[0].Path != running || inUse[0].ID != "org.example.Running" ||
+			inUse[0].PID != cmd.Process.Pid || inUse[0].Size != diskUsage(running) {
+			t.Fatalf("dry run %v: in use %v, want %s by pid %d", dryRun, inUse, running, cmd.Process.Pid)
+		}
+		if c.Objects != 1 || c.Freed != unusedSize {
+			t.Errorf("dry run %v: %d objects, %d freed", dryRun, c.Objects, c.Freed)
+		}
 	}
 	writable := os.Geteuid() == 0 // root can open the read-only .ref
 	for _, p := range []string{running, noRef, linked, filepath.Join(removed, "stray-file")} {
@@ -410,12 +408,106 @@ func TestRemoved(t *testing.T) {
 	}
 
 	// Once the app has quit, its deployment goes.
-	stdin.Close()
-	cmd.Wait()
-	r = recorder{}
-	r.cleaner(false).Removed(inst)
-	if exists(running) {
-		t.Errorf("%s kept after the app quit: %q", running, r.items)
+	release()
+	var r recorder
+	if inUse := r.cleaner(false).Removed(inst); exists(running) || len(inUse) != 0 {
+		t.Errorf("%s kept after the app quit: %q, in use %v", running, r.items, inUse)
+	}
+}
+
+// holdRefLock starts a process that holds a read lock on ref as bwrap
+// does, and returns it with a function that ends it.
+func holdRefLock(t *testing.T, ref string) (*exec.Cmd, func()) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "HOLD_REF_LOCK="+ref)
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if line, _ := bufio.NewReader(stdout).ReadString('\n'); line != "ready\n" {
+		stdin.Close()
+		cmd.Wait()
+		t.Fatal("lock holder did not start")
+	}
+	done := false
+	return cmd, func() {
+		if !done {
+			done = true
+			stdin.Close()
+			cmd.Wait()
+		}
+	}
+}
+
+// TestRemovedInUseReadOnly: a .ref that cannot be opened read-write, as in
+// a system installation looked at by a user, is still tested for a lock
+// read-only. In use, it is reported; not in use, it is kept as before,
+// since flatpak's own test could not be made.
+func TestRemovedInUseReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open any .ref read-write")
+	}
+	inst := t.TempDir()
+	locked := filepath.Join(inst, ".removed", "org.example.Locked-"+c1)
+	write(t, filepath.Join(locked, "files", ".ref"), nil, 0o444)
+	idle := filepath.Join(inst, ".removed", "org.example.Idle-"+c2)
+	write(t, filepath.Join(idle, "files", ".ref"), nil, 0o444)
+	cmd, release := holdRefLock(t, filepath.Join(locked, "files", ".ref"))
+	defer release()
+
+	var r recorder
+	var kept []string
+	c := r.cleaner(false)
+	c.Verbose = func(format string, a ...any) { kept = append(kept, fmt.Sprintf(format, a...)) }
+	inUse := c.Removed(inst)
+	if len(inUse) != 1 || inUse[0].Path != locked || inUse[0].ID != "org.example.Locked" || inUse[0].PID != cmd.Process.Pid {
+		t.Errorf("in use: %v", inUse)
+	}
+	if len(r.items) != 0 || !exists(idle) || !exists(locked) {
+		t.Errorf("items %q", r.items)
+	}
+	// Only what is kept for another reason is told with -v.
+	if len(kept) != 1 || !strings.Contains(kept[0], idle+": files/.ref: permission denied") {
+		t.Errorf("verbose: %q", kept)
+	}
+}
+
+func TestDeployID(t *testing.T) {
+	dir := t.TempDir()
+	deploy := func(name, meta string) string {
+		path := filepath.Join(dir, name)
+		mkdir(t, path)
+		if meta != "" {
+			write(t, filepath.Join(path, "metadata"), []byte(meta), 0o644)
+		}
+		return path
+	}
+	linked := deploy("org.example.Linked-"+c4, "")
+	os.Symlink(filepath.Join(dir, "app-meta"), filepath.Join(linked, "metadata"))
+	write(t, filepath.Join(dir, "app-meta"), []byte("[Application]\nname=org.example.Elsewhere\n"), 0o644)
+	big := deploy("org.example.Big-"+c5, "[Application]\nname=org.example.Huge\n"+strings.Repeat("#", 2<<20)+"\n")
+	for path, want := range map[string]string{
+		// the metadata names it
+		deploy("com.tencent.WeChat-"+c1, "[Application]\nname=com.tencent.WeChat\nruntime=org.freedesktop.Platform/x86_64/24.08\n"): "com.tencent.WeChat",
+		deploy("org.example.Renamed-"+c2, "[Application]\nname = org.example.Real\n"):                                               "org.example.Real",
+		deploy("org.freedesktop.Platform-"+c3, "[Runtime]\nname=org.freedesktop.Platform\n"):                                        "org.freedesktop.Platform",
+		// else the directory name without -CHECKSUM
+		deploy("org.example.NoMeta-"+c1, ""):                                       "org.example.NoMeta",
+		deploy("org.example.NoName-"+c2, "[Application]\nruntime=x/y/z\n"):         "org.example.NoName",
+		deploy("org.example.BadName-"+c3, "[Application]\nname=not an id\n"):       "org.example.BadName",
+		deploy("org.example.Other-"+c4, "[Extension org.x]\nname=org.example.X\n"): "org.example.Other",
+		deploy("org.example.Suffix-"+c5+"-AbC123", ""):                             "org.example.Suffix",
+		deploy("org.example-dash-"+c1, ""):                                         "org.example-dash",
+		deploy("no-checksum-here", ""):                                             "no-checksum-here",
+		deploy("org.example.Short-"+c1[:63], ""):                                   "org.example.Short-" + c1[:63],
+		linked:                                                                     "org.example.Linked",
+		big:                                                                        "org.example.Big",
+	} {
+		if got := deployID(path); got != want {
+			t.Errorf("%s: %q, want %q", filepath.Base(path), got, want)
+		}
 	}
 }
 

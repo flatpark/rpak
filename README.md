@@ -56,9 +56,20 @@ rpak clean [--user | --system | --installation=NAME]... [--dry-run] [--delete-da
 ```
 
 Frees the installers cached in the repositories, leftovers of interrupted
-downloads and installs, and old deployments. The data of apps that are no
-longer installed (`~/.var/app/ID`, overrides) is only listed; add
-`--delete-data` to delete it.
+downloads and installs, and old deployments (`.removed`). The data of apps
+that are no longer installed (`~/.var/app/ID`, overrides) is only listed;
+add `--delete-data` to delete it.
+
+An old deployment that a running app still uses (the app was updated while
+it ran) stays until the app quits, as with flatpak. rpak clean lists those
+with the app and the pid of its sandbox (as `flatpak ps` shows it in
+CHILD-PID), and does not count them as freed:
+
+```
+  Old deployments still in use
+     757.0 MB  .removed/com.tencent.WeChat-2c45506193f71d4a…c4df35c8d067bcf47ee18  used by com.tencent.WeChat (pid 1234)
+  Quit them and run rpak clean again
+```
 
 ```
 $ rpak clean

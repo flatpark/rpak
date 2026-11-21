@@ -17,6 +17,7 @@ package clean
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -583,23 +584,28 @@ func (c *Cleaner) emptyDirs(dir string, removeSelf bool, maxDepth int, removed *
 // flatpak treats a .ref it cannot open as "not in use" and deletes the
 // directory, rpak keeps it: rpak only deletes what flatpak would delete,
 // not necessarily everything.
-func (c *Cleaner) Removed(installation string) {
+//
+// The deployments that are in use are kept and returned, in the order they
+// were found, so that the caller can say what still takes the space: a
+// user who sees .removed take gigabytes in du should not have to guess.
+// Those kept for any other reason are only mentioned with Verbose.
+func (c *Cleaner) Removed(installation string) []InUse {
 	root := filepath.Join(installation, ".removed")
 	entries, err := readDir(root)
 	if err != nil {
-		return
+		return nil
 	}
+	var inUse []InUse
 	for _, e := range entries {
 		path := filepath.Join(root, e.Name())
 		if !e.IsDir() {
 			continue
 		}
-		if inUse, err := deployInUse(path); err != nil || inUse {
-			if err != nil {
-				c.verbose("keeping %s: %v", path, err)
-			} else {
-				c.verbose("keeping %s: in use by a running instance", path)
-			}
+		if locked, pid, err := deployInUse(path); err != nil {
+			c.verbose("keeping %s: %v", path, err)
+			continue
+		} else if locked {
+			inUse = append(inUse, InUse{Path: path, Size: diskUsage(path), ID: deployID(path), PID: pid})
 			continue
 		}
 		size := diskUsage(path)
@@ -611,38 +617,117 @@ func (c *Cleaner) Removed(installation string) {
 		}
 		c.report(size, path)
 	}
+	return inUse
+}
+
+// InUse is an old deployment in .removed that a running instance uses.
+type InUse struct {
+	Path string
+	Size int64
+	// ID is the app or runtime it belongs to; see deployID.
+	ID string
+	// PID is the process that holds the lock, as F_GETLK reports it: for
+	// bwrap the sandbox's first process, flatpak ps's CHILD-PID. 0 when
+	// it is not known: an OFD lock, or a process in a pid namespace that
+	// is not visible from this one.
+	PID int
+}
+
+// deployID is the ID of the app or runtime of a deployment: the name in
+// its metadata, as flatpak writes it, or else the directory name without
+// the -CHECKSUM flatpak_dir_undeploy() appended to it.
+func deployID(deploy string) string {
+	if text, err := readSmallFile(filepath.Join(deploy, "metadata"), 1<<20); err == nil {
+		for _, want := range []string{"Application", "Runtime"} {
+			for _, g := range metadata.KeyFile(text) {
+				if g.Name == want && dbusName(g.Values["name"]) {
+					return g.Values["name"]
+				}
+			}
+		}
+	}
+	name := filepath.Base(deploy)
+	for i := len(name) - 1; i > 0; i-- {
+		if name[i] == '-' && i+65 <= len(name) && metadata.ValidChecksum(name[i+1:i+65]) {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+// readSmallFile reads a regular file of at most limit bytes without
+// following a symlink: the metadata of a deployment is the app's, and only
+// a name for the report is wanted from it.
+func readSmallFile(path string, limit int64) (string, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return "", fmt.Errorf("%s: not a small regular file", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit))
+	return string(b), err
 }
 
 // deployInUse reports whether a running instance holds a lock on the
-// deployment's files/.ref. Anything unusual (symlinks, no .ref, no write
-// access) is an error, which callers take as "keep".
-func deployInUse(deploy string) (bool, error) {
+// deployment's files/.ref, and the pid of the holder if it is known.
+// Anything unusual (symlinks, no .ref, no access) is an error, which
+// callers take as "keep".
+//
+// Where .ref cannot be opened read-write, as flatpak opens it (a system
+// installation looked at by a user), it is opened read-only to tell
+// whether it is in use: F_GETLK does not care how the file was opened. A
+// lock found that way only ever keeps a deployment; without one the
+// error stands, so nothing is deleted that flatpak could not test.
+func deployInUse(deploy string) (bool, int, error) {
 	files := filepath.Join(deploy, "files")
 	info, err := os.Lstat(files)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if !info.IsDir() {
-		return false, fmt.Errorf("files is not a directory")
+		return false, 0, fmt.Errorf("files is not a directory")
 	}
 	ref := filepath.Join(files, ".ref")
-	fd, err := unix.Open(ref, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+	locked, pid, err := refLocked(ref, unix.O_RDWR)
+	if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EROFS) {
+		if l, p, err2 := refLocked(ref, unix.O_RDONLY); err2 == nil && l {
+			return true, p, nil
+		}
+	}
+	return locked, pid, err
+}
+
+// refLocked opens .ref with mode and asks with F_GETLK whether a write
+// lock on the whole file would conflict with someone's lock.
+func refLocked(ref string, mode int) (bool, int, error) {
+	fd, err := unix.Open(ref, mode|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
 	if err != nil {
-		return false, fmt.Errorf("files/.ref: %w", err)
+		return false, 0, fmt.Errorf("files/.ref: %w", err)
 	}
 	defer unix.Close(fd)
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return false, fmt.Errorf("files/.ref is not a regular file")
+		return false, 0, fmt.Errorf("files/.ref is not a regular file")
 	}
 	fl := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 0}
 	if err := unix.FcntlFlock(uintptr(fd), unix.F_GETLK, &fl); err != nil {
-		return false, err
+		return false, 0, err
 	}
-	return fl.Type != unix.F_UNLCK, nil
+	if fl.Type == unix.F_UNLCK {
+		return false, 0, nil
+	}
+	// -1 for an OFD lock, 0 for a holder outside this pid namespace.
+	return true, max(int(fl.Pid), 0), nil
 }
 
 // diskUsage is g_file_measure_disk_usage (G_FILE_MEASURE_NONE): the

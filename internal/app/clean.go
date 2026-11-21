@@ -32,6 +32,9 @@ Frees the space stock flatpak leaves behind:
     directories of interrupted installs, and old deployments in .removed
     that no running app uses
 
+Old deployments that running apps still use are listed with the app that
+uses them; quit it and run rpak clean again to free them.
+
 The data of apps that are no longer installed anywhere (~/.var/app/ID and
 overrides) is listed with the user installation. It is only deleted with
 --delete-data, which also resets the apps' portal permissions ("flatpak
@@ -185,9 +188,10 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 		out.installation(inst)
 		readOnly, failed := false, false
 		var wouldFree int64
+		var inUse []clean.InUse
 		if haveRepo {
 			c := &clean.Cleaner{DryRun: opts.dryRun, Item: item, Verbose: verbose, Warn: warn}
-			readOnly, err = cleanRepo(c, inst, explicit, out.section)
+			readOnly, inUse, err = cleanRepo(c, inst, explicit, out.section)
 			if err != nil {
 				errorf("%s: %v", inst.Title(), err)
 				code = 1
@@ -231,6 +235,8 @@ func cleanCommand(argv []string, stdout, stderr io.Writer) int {
 				}
 			}
 		}
+		// Last, so that what was freed is not split up by what was kept.
+		out.inUseSection(inUse)
 		if failed {
 			out.failed()
 		} else if several || readOnly {
@@ -332,12 +338,13 @@ func resetPermissions(id string) error {
 // cleanRepo is clean_repo(): checks that the repository may be changed,
 // locks it, and runs a. and c. on it, telling section which one runs. A
 // repository that is not writable is only inspected, as a dry run, unless
-// the installation was asked for explicitly, which is an error.
-func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool, section func(cleanKind, string)) (readOnly bool, err error) {
+// the installation was asked for explicitly, which is an error. It returns
+// the old deployments kept because they are in use.
+func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool, section func(cleanKind, string)) (readOnly bool, inUse []clean.InUse, err error) {
 	repo := filepath.Join(inst.Path, "repo")
 	if !clean.Writable(inst.Path) {
 		if explicit {
-			return false, fmt.Errorf("the repository at %s is not writable; run this command as root", repo)
+			return false, nil, fmt.Errorf("the repository at %s is not writable; run this command as root", repo)
 		}
 		readOnly = true
 		c.DryRun = true
@@ -346,7 +353,7 @@ func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool, 
 	if !c.DryRun {
 		release, err := clean.Lock(inst.Path)
 		if err != nil {
-			return false, err
+			return false, nil, err
 		}
 		defer release()
 	}
@@ -357,8 +364,8 @@ func cleanRepo(c *clean.Cleaner, inst installation.Installation, explicit bool, 
 	section(kindPath, "Interrupted installs and updates")
 	c.InterruptedDeploys(inst.Path)
 	section(kindPath, "Old deployments no longer in use")
-	c.Removed(inst.Path)
-	return readOnly, nil
+	inUse = c.Removed(inst.Path)
+	return readOnly, inUse, nil
 }
 
 // reclaim strips xa.extra-data from the repositories of the installations

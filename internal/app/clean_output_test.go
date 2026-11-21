@@ -193,3 +193,138 @@ func TestCleanOutputNothing(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// inUseRun prints an installation with an old deployment removed and two
+// still in use, the second without a pid, then a total.
+func inUseRun(cols int, color, dryRun bool) string {
+	var b bytes.Buffer
+	t := term{}
+	if cols > 0 {
+		t = term{tty: true, redraw: true, color: color, cols: cols}
+	}
+	base := "/home/me/.local/share/flatpak"
+	p := &cleanPrinter{w: &b, t: t, home: "/home/me", dryRun: dryRun}
+	p.installation(installation.Installation{User: true, Path: base})
+	p.section(kindPath, "Old deployments no longer in use")
+	p.item(12_300_000, base+"/.removed/org.example.Old-"+strings.Repeat("1", 64))
+	p.section(kindPath, "rpak's prefetch directories") // no items: no subheading
+	p.inUseSection([]clean.InUse{
+		{Path: base + "/.removed/com.tencent.WeChat-2c45506193f71d4a6e00a3d418aa5deb14c09bbd3a7c4df35c8d067bcf47ee18", Size: 757_000_000, ID: "com.tencent.WeChat", PID: 1234},
+		{Path: base + "/.removed/ai.usemagpie.Magpie-" + strings.Repeat("4", 64), Size: 93_000_000, ID: "ai.usemagpie.Magpie"},
+	})
+	p.summary(false, "", 0)
+	p.total(1, 12_300_000)
+	return b.String()
+}
+
+func TestCleanOutputInUse(t *testing.T) {
+	// Not a terminal: whole lines. Listed after what was freed, not
+	// counted, but told in the totals.
+	want := `User installation  ~/.local/share/flatpak
+  Old deployments no longer in use
+      12.3 MB  .removed/org.example.Old-` + strings.Repeat("1", 64) + `
+  Old deployments still in use
+     757.0 MB  .removed/com.tencent.WeChat-2c45506193f71d4a6e00a3d418aa5deb14c09bbd3a7c4df35c8d067bcf47ee18  used by com.tencent.WeChat (pid 1234)
+      93.0 MB  .removed/ai.usemagpie.Magpie-` + strings.Repeat("4", 64) + `  used by ai.usemagpie.Magpie
+  Quit them and run rpak clean again
+  Freed 12.3 MB; 850.0 MB still in use
+
+Freed 12.3 MB (1 item); 850.0 MB still in use
+`
+	if got := inUseRun(0, false, false); got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+	dry := inUseRun(0, false, true)
+	if !strings.Contains(dry, "  Old deployments still in use\n") || !strings.Contains(dry, "  used by com.tencent.WeChat (pid 1234)\n") ||
+		!strings.HasSuffix(dry, "\n  Would free 12.3 MB; 850.0 MB still in use\n\nWould free 12.3 MB (1 item); 850.0 MB still in use\n") {
+		t.Errorf("dry run:\n%s", dry)
+	}
+
+	// 100 columns: the directory shortened in the middle as other items
+	// are, the note kept; nothing wider than 99 cells.
+	got := inUseRun(100, false, false)
+	for _, l := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if w := textWidth(l); w > 99 {
+			t.Errorf("%d cells: %q", w, l)
+		}
+	}
+	for _, want := range []string{
+		"     757.0 MB  .removed/com.tencent.WeChat-2c…8d067bcf47ee18  used by com.tencent.WeChat (pid 1234)\n",
+		"      93.0 MB  .removed/ai.usemagpie.Magpie-4444444…444444444444444444  used by ai.usemagpie.Magpie\n",
+		"  Quit them and run rpak clean again\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("100 columns: no %q in\n%s", want, got)
+		}
+	}
+	// Narrower: the note is what the section is for, so the directory gives
+	// way first, then the pid, and only then the note.
+	for _, c := range []struct {
+		cols int
+		want string
+	}{
+		{80, "     757.0 MB  .removed/com.ten…cf47ee18  used by com.tencent.WeChat (pid 1234)\n"},
+		{60, "     757.0 MB  .removed/c…7ee18  used by com.tencent.WeChat\n"},
+		{40, "     757.0 MB  .removed/com.ten…f47ee18\n"},
+	} {
+		if got := inUseRun(c.cols, false, false); !strings.Contains(got, c.want) {
+			t.Errorf("%d columns: no %q in\n%s", c.cols, c.want, got)
+		}
+	}
+
+	// Colours: faint notes and hint, as for the other items.
+	colored := inUseRun(200, true, false)
+	for _, want := range []string{
+		"  \x1b[2mused by com.tencent.WeChat (pid 1234)\x1b[0m\n",
+		"  \x1b[2mQuit them and run rpak clean again\x1b[0m\n",
+		"\x1b[32mFreed 12.3 MB (1 item)\x1b[0m; 850.0 MB still in use\n",
+	} {
+		if !strings.Contains(colored, want) {
+			t.Errorf("no %q in %q", want, colored)
+		}
+	}
+	if plain := sgr.ReplaceAllString(colored, ""); plain != inUseRun(200, false, false) {
+		t.Errorf("with colours, the text differs:\n%s", plain)
+	}
+}
+
+// TestCleanOutputOnlyInUse: when nothing can be freed because everything
+// is in use, the totals say so rather than just "Nothing to free"; with
+// several installations, the hint ends each one's section.
+func TestCleanOutputOnlyInUse(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		var b bytes.Buffer
+		p := &cleanPrinter{w: &b, home: "/home/me", dryRun: dryRun}
+		p.installation(installation.Installation{ID: installation.DefaultID, Path: "/var/lib/flatpak"})
+		p.section(kindPath, "Old deployments no longer in use")
+		p.inUseSection([]clean.InUse{{Path: "/var/lib/flatpak/.removed/org.example.Sys-" + strings.Repeat("a", 64), Size: 2_000_000, ID: "org.example.Sys", PID: 7}})
+		p.summary(true, `run "sudo rpak clean --system"`, 0)
+		p.installation(installation.Installation{User: true, Path: "/home/me/.local/share/flatpak"})
+		p.inUseSection(nil) // nothing in use: nothing said
+		p.summary(false, "", 0)
+		p.installation(installation.Installation{ID: "extra", Path: "/opt/flatpak"})
+		p.inUseSection([]clean.InUse{{Path: "/opt/flatpak/.removed/org.example.Extra-" + strings.Repeat("b", 64), Size: 1_000_000, ID: "org.example.Extra"}})
+		p.summary(false, "", 0)
+		p.total(0, 0)
+		nothing := "Nothing freed"
+		if dryRun {
+			nothing = "Nothing to free"
+		}
+		want := "System installation (default)  /var/lib/flatpak\n" +
+			"  Old deployments still in use\n" +
+			"       2.0 MB  .removed/org.example.Sys-" + strings.Repeat("a", 64) + "  used by org.example.Sys (pid 7)\n" +
+			"  Quit them and run rpak clean again\n" +
+			"  Nothing to free; 2.0 MB still in use\n\n" +
+			"User installation  ~/.local/share/flatpak\n" +
+			"  Nothing to free\n\n" +
+			"Installation system (extra)  /opt/flatpak\n" +
+			"  Old deployments still in use\n" +
+			"       1.0 MB  .removed/org.example.Extra-" + strings.Repeat("b", 64) + "  used by org.example.Extra\n" +
+			"  Quit them and run rpak clean again\n" +
+			"  Nothing to free; 1.0 MB still in use\n\n" +
+			nothing + "; 3.0 MB still in use\n"
+		if b.String() != want {
+			t.Errorf("dry run %v: got\n%s\nwant\n%s", dryRun, b.String(), want)
+		}
+	}
+}
