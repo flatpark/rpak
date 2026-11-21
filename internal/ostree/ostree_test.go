@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/flatpark/rpak/internal/gvariant"
@@ -161,9 +162,9 @@ func TestCheckoutFile(t *testing.T) {
 }
 
 func TestCheckoutHTTP(t *testing.T) {
-	var requests int
+	var requests atomic.Int64 // objects are fetched concurrently
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		requests.Add(1)
 		if r.Header.Get("User-Agent") != "rpak-test" {
 			t.Errorf("User-Agent %q", r.Header.Get("User-Agent"))
 		}
@@ -183,8 +184,8 @@ func TestCheckoutHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkTree(t, dir)
-	if requests < 10 {
-		t.Errorf("only %d requests", requests)
+	if requests.Load() < 10 {
+		t.Errorf("only %d requests", requests.Load())
 	}
 }
 
