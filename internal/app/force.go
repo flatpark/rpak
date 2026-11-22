@@ -124,6 +124,8 @@ type forceFlow struct {
 	// used them (and removes them, see runFlatpak).
 	fetched []string
 	ran     bool
+	// exported reports that this run exported to rpak-local.
+	exported bool
 	// warned are the apps whose experimental line has been printed.
 	warned map[string]bool
 	dryRun bool
@@ -1812,6 +1814,7 @@ func (f *forceFlow) export(items []item) error {
 			srcs[it.upstream] = src
 		}
 		f.note("reexporting %s %s from %s with %s", idOf(it.ref), it.commit[:12], it.upstream, exportText(it))
+		f.exported = true
 		if err := fr.Export(f.ctx, f.query, f.user, src, it.job()); err != nil {
 			return fmt.Errorf("reexporting %s: %w", it.ref, err)
 		}
@@ -1868,12 +1871,29 @@ func (f *forceFlow) updateSplit(opts, updateArgs []string) int {
 			userArgs = append(userArgs, arg)
 		}
 	}
+	runUser := len(updateArgs) == 0 || len(userArgs) > 0
+	runSystem := len(systems) > 0 && (len(updateArgs) == 0 || len(sysArgs) > 0)
+	if runUser && runSystem {
+		// One command, one result: an installation with nothing to update
+		// is left out, and with nothing anywhere only the user one runs,
+		// to say so once. remote-ls misses a new commit of rpak-local made
+		// in this run (its remote added again, say), so the user
+		// installation is not asked then: it has something to update.
+		var sysOpts []string
+		for _, inst := range systems {
+			sysOpts = append(sysOpts, inst.Option())
+		}
+		userPending := f.exported || f.pendingIn([]string{args.User}, userArgs)
+		sysPending := f.pendingIn(sysOpts, sysArgs)
+		runSystem = sysPending
+		runUser = userPending || !sysPending
+	}
 	code := 0
-	if len(updateArgs) == 0 || len(userArgs) > 0 {
+	if runUser {
 		a := append(append([]string(nil), opts...), args.User, "--no-deps")
 		code = f.runTransaction("update", f.cmdArgv("update", append(a, userArgs...)...))
 	}
-	if len(systems) > 0 && (len(updateArgs) == 0 || len(sysArgs) > 0) {
+	if runSystem {
 		a := append([]string(nil), opts...)
 		for _, inst := range systems {
 			a = append(a, inst.Option())
@@ -1883,6 +1903,30 @@ func (f *forceFlow) updateSplit(opts, updateArgs []string) int {
 		}
 	}
 	return code
+}
+
+// pendingIn reports whether flatpak update would find something to update
+// in the installations given by their options, among refs (all if none),
+// by "flatpak remote-ls --updates". When that cannot be told (a remote
+// cannot be reached, say) it reports true: the update runs and flatpak
+// says what is wrong.
+func (f *forceFlow) pendingIn(instOpts, refs []string) bool {
+	for _, opt := range instOpts {
+		argv := []string{"remote-ls", opt, "--updates", "--columns=ref"}
+		if f.parsed.Arch != "" {
+			argv = append(argv, "--arch="+f.parsed.Arch)
+		}
+		out, err := f.query.Output(f.ctx, argv...)
+		if err != nil {
+			return true
+		}
+		for _, ref := range strings.Fields(string(out)) {
+			if strings.Count(ref, "/") == 3 && (len(refs) == 0 || plan.MatchesAny(ref, refs)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // patchApps is rpak patch --force-runtime[=TARGET] and/or
