@@ -431,6 +431,10 @@ func summaryLine(s prefetch.Summary, transferred int64, took time.Duration) line
 		unreadySGR = sgrYellow
 	}
 	l.add(fmt.Sprintf("%d skipped/failed", unready), unreadySGR)
+	if n := len(s.Changed); n > 0 {
+		l.add(", ", "")
+		l.add(fmt.Sprintf("%d replaced upstream", n), sgrYellow)
+	}
 	l.add(fmt.Sprintf(", %s in %s", humanSize(transferred), elapsed(took)), sgrFaint)
 	return l
 }

@@ -918,6 +918,31 @@ rpak patch -y --reset org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.lo
 ! flatpak remotes --user --columns=name | grep -qx rpak-local || fail "rpak-local is still there"
 pass "reset: org.rpak.test.Extra 14 from upstream as built, rpak-local gone"
 
+step "extra-data g: upstream replaces the file at the same URL"
+# Same size, other content: no server tells, rpak finds out once it has
+# downloaded it, stops flatpak at its question and offers the patch.
+# script(1) gives rpak and flatpak a terminal; the answers are flatpak's
+# "y" (held, then not passed on) and rpak's "y".
+pinned=$(flatpak remote-info --user --show-metadata upstream org.rpak.test.Extra | sed -n 's/^uri=//p')
+file=$www/${pinned#"$url"/}
+cp "$file" /tmp/xd-pinned
+rev < /tmp/xd-pinned > "$file"
+cmp -s "$file" /tmp/xd-pinned && fail "the replaced file is the same"
+flatpak uninstall --user -y org.rpak.test.Extra >/dev/null
+{ sleep 3; echo y; sleep 5; echo y; } | TERM=xterm script -qefc "rpak install --user upstream org.rpak.test.Extra" /dev/null > /tmp/xd-replaced.log 2>&1 ||
+	{ cat /tmp/xd-replaced.log; fail "rpak install with a replaced file"; }
+grep -a '^rpak\|y/N' /tmp/xd-replaced.log
+grep -aq "rpak: Stopped flatpak at its question" /tmp/xd-replaced.log || fail "flatpak was not stopped"
+grep -aq "upstream has likely replaced it at the same URL" /tmp/xd-replaced.log || fail "no notice of the replaced file"
+[ "$(origin)" = rpak-local ] || fail "origin $(origin)"
+[ "$(cat "$xd/extra/marker")" = "$(tr a-z A-Z < "$file")" ] || fail "marker $(cat "$xd/extra/marker")"
+rpak patch --list | grep -q "$pinned" || fail "no extra-data patch recorded"
+pass "a file replaced upstream: flatpak stopped, the app patched to the file as it is now and installed from rpak-local"
+cp /tmp/xd-pinned "$file"
+rpak patch -y --reset org.rpak.test.Extra > /tmp/xd.log 2>&1 || { cat /tmp/xd.log; fail "--reset after the replaced file"; }
+[ "$(origin)" = upstream ] || fail "after the reset: origin $(origin)"
+pass "file restored upstream, reset: from upstream as built"
+
 kill "$http_pid" 2>/dev/null || true
 unset no_proxy NO_PROXY
 

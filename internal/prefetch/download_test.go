@@ -152,33 +152,15 @@ func TestDownload(t *testing.T) {
 	}
 }
 
-func TestChecksumMismatchLeavesNoFile(t *testing.T) {
-	srv := newServer(t)
-	base := t.TempDir()
-	s := srv.add("/a.bin", payload(5000, 1))
-	s.Checksum = sum([]byte("something else"))
-	cfg := testConfig(t, base)
-	cfg.Retries = 2
-	summary, results := run(t, cfg, s)
-
-	if summary.Failed != 1 || !strings.Contains(results["a.bin"].Err.Error(), "checksum mismatch") {
-		t.Fatalf("summary %+v, results %+v", summary, results)
-	}
-	if srv.requests.Load() != 3 {
-		t.Errorf("requests = %d, want 3 (1 + 2 retries)", srv.requests.Load())
-	}
-	assertMissing(t, target(base, s))
-	assertMissing(t, target(base, s)+".part")
-	if len(summary.Dirs) != 0 {
-		t.Errorf("dirs = %q", summary.Dirs)
-	}
-}
-
-func TestSizeMismatchLeavesNoFile(t *testing.T) {
+// A whole file that is not the source's is upstream's new one: it is not
+// retried, nothing is left under the source's checksum (flatpak would fail
+// on it), and the file is kept under its own for an extra-data patch.
+func TestChangedFile(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		served []byte
 	}{
+		{"same size", payload(5000, 9)},
 		{"longer", payload(6000, 2)},
 		{"shorter", payload(4000, 2)},
 	} {
@@ -189,16 +171,156 @@ func TestSizeMismatchLeavesNoFile(t *testing.T) {
 			s := srv.add("/a.bin", tc.served)
 			s.Size, s.Checksum = int64(len(want)), sum(want)
 			cfg := testConfig(t, base)
-			cfg.Retries = 1
+			cfg.Retries = 2
 			summary, results := run(t, cfg, s)
 
-			// The short body is resumed on retry, which the server refuses.
-			if summary.Failed != 1 || results["a.bin"].Err == nil {
+			r := results["a.bin"]
+			if r.Status != Changed || len(summary.Changed) != 1 || len(summary.Dirs) != 0 {
 				t.Fatalf("summary %+v, results %+v", summary, results)
+			}
+			if srv.requests.Load() != 1 {
+				t.Errorf("requests = %d, want 1: a changed file is not retried", srv.requests.Load())
+			}
+			got := summary.Changed[0].Got
+			if got.Size != int64(len(tc.served)) || got.Checksum != sum(tc.served) || got.URI != s.URI || got.Ref != s.Ref {
+				t.Errorf("got %+v", got)
 			}
 			assertMissing(t, target(base, s))
 			assertMissing(t, target(base, s)+".part")
+			if r.Dir != ExtraDataDir(base, got.Checksum) || !hasMarker(r.Dir) {
+				t.Errorf("dir %q", r.Dir)
+			}
+			assertFile(t, target(base, got), tc.served)
+			if !HasFile(r.Dir, got) {
+				t.Error("HasFile is false")
+			}
 		})
+	}
+}
+
+// Without a length or chunked framing, a short body may be a dropped
+// connection: it is resumed, not taken as a new file.
+func TestShortUnframedBodyIsResumed(t *testing.T) {
+	srv := newServer(t)
+	base := t.TempDir()
+	content := payload(50_000, 4)
+	s := srv.add("/a.bin", content)
+	var calls atomic.Int64
+	srv.handler = func(w http.ResponseWriter, r *http.Request, content []byte) bool {
+		if calls.Add(1) > 1 {
+			return false
+		}
+		hj, _ := w.(http.Hijacker)
+		conn, buf, _ := hj.Hijack()
+		defer conn.Close()
+		fmt.Fprintf(buf, "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n")
+		buf.Write(content[:20_000])
+		buf.Flush()
+		return true
+	}
+	cfg := testConfig(t, base)
+	cfg.Retries = 1
+	summary, results := run(t, cfg, s)
+	if summary.Downloaded != 1 || srv.ranges.Load() != 1 {
+		t.Fatalf("summary %+v, results %+v, ranges %d", summary, results, srv.ranges.Load())
+	}
+	assertFile(t, target(base, s), content)
+}
+
+// A resumed download that ends up wrong is started over: its start may be
+// of the old file.
+func TestResumedMismatchStartsOver(t *testing.T) {
+	srv := newServer(t)
+	base := t.TempDir()
+	served := payload(5000, 7)
+	want := payload(5000, 8)
+	s := srv.add("/a.bin", served)
+	s.Checksum = sum(want)
+	dir := ExtraDataDir(base, s.Checksum)
+	if ok, err := claimDir(dir, "old\n"); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if err := os.WriteFile(target(base, s)+".part", want[:1000], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t, base)
+	cfg.Retries = 1
+	summary, results := run(t, cfg, s)
+	if len(summary.Changed) != 1 || srv.requests.Load() != 2 || srv.ranges.Load() != 1 {
+		t.Fatalf("summary %+v, results %+v, requests %d", summary, results, srv.requests.Load())
+	}
+	if got := summary.Changed[0].Got; got.Checksum != sum(served) {
+		t.Errorf("got %+v, want the whole served file", got)
+	}
+}
+
+// A resume whose Content-Range says another total starts over.
+func TestResumeOtherTotalStartsOver(t *testing.T) {
+	srv := newServer(t)
+	base := t.TempDir()
+	served := payload(6000, 7)
+	want := payload(5000, 7)
+	s := srv.add("/a.bin", served)
+	s.Size, s.Checksum = int64(len(want)), sum(want)
+	if ok, err := claimDir(ExtraDataDir(base, s.Checksum), "old\n"); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if err := os.WriteFile(target(base, s)+".part", want[:1000], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t, base)
+	cfg.Retries = 1
+	summary, _ := run(t, cfg, s)
+	if len(summary.Changed) != 1 || summary.Changed[0].Got.Checksum != sum(served) || srv.requests.Load() != 2 {
+		t.Fatalf("summary %+v, requests %d", summary, srv.requests.Load())
+	}
+}
+
+func TestNotFoundIsNotRetried(t *testing.T) {
+	srv := newServer(t)
+	base := t.TempDir()
+	s := srv.add("/a.bin", payload(100, 1))
+	s.URI = srv.URL + "/gone.bin"
+	cfg := testConfig(t, base)
+	cfg.Retries = 3
+	var retries atomic.Int64
+	cfg.OnRetry = func(metadata.Source, error, time.Duration) { retries.Add(1) }
+	summary, _ := run(t, cfg, s)
+	if summary.Failed != 1 || srv.requests.Load() != 1 || retries.Load() != 0 {
+		t.Fatalf("summary %+v, requests %d, retries %d", summary, srv.requests.Load(), retries.Load())
+	}
+}
+
+func TestRetryBackoff(t *testing.T) {
+	srv := newServer(t)
+	base := t.TempDir()
+	content := payload(1000, 1)
+	s := srv.add("/a.bin", content)
+	var calls atomic.Int64
+	srv.handler = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+		if calls.Add(1) <= 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return true
+		}
+		return false
+	}
+	cfg := testConfig(t, base)
+	cfg.Retries = 4
+	cfg.Backoff, cfg.MaxBackoff = time.Millisecond, 3*time.Millisecond
+	var mu sync.Mutex
+	var waits []time.Duration
+	cfg.OnRetry = func(_ metadata.Source, err error, wait time.Duration) {
+		mu.Lock()
+		waits = append(waits, wait)
+		mu.Unlock()
+	}
+	summary, _ := run(t, cfg, s)
+	if summary.Downloaded != 1 {
+		t.Fatalf("summary %+v", summary)
+	}
+	want := []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond}
+	if fmt.Sprint(waits) != fmt.Sprint(want) {
+		t.Errorf("waits %v, want %v", waits, want)
 	}
 }
 

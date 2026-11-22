@@ -167,8 +167,10 @@ func (c *console) close() {
 // start passes the terminal's input on to flatpak until the returned stop
 // is called, which also puts the terminal back in its mode. hold is called
 // for an answer that is to wait for the prefetch and returns what to wait
-// for, nil if there is no need.
-func (c *console) start(hold func() <-chan struct{}) (stop func()) {
+// for, nil if there is no need. veto, if not nil, is asked before such an
+// answer is passed on: if it says so, flatpak gets the end of its input
+// instead, and stops at its question.
+func (c *console) start(hold func() <-chan struct{}, veto func() bool) (stop func()) {
 	cont := make(chan os.Signal, 1)
 	signal.Notify(cont, syscall.SIGCONT)
 	c.wg.Add(3)
@@ -178,7 +180,7 @@ func (c *console) start(hold func() <-chan struct{}) (stop func()) {
 	}()
 	go func() {
 		defer c.wg.Done()
-		c.forward(hold)
+		c.forward(hold, veto)
 	}()
 	go func() {
 		defer c.wg.Done()
@@ -285,7 +287,7 @@ const yieldInterval = 20 * time.Millisecond
 // go on until flatpak exits. Any other line, an empty one (yes by default)
 // included, is held back while hold's channel is open. Out of canonical
 // mode bytes are passed on as they come.
-func (c *console) forward(hold func() <-chan struct{}) {
+func (c *console) forward(hold func() <-chan struct{}, veto func() bool) {
 	buf := make([]byte, 4096)
 	var pending []byte
 	fds := make([]unix.PollFd, 2)
@@ -345,6 +347,10 @@ func (c *console) forward(hold func() <-chan struct{}) {
 				case <-c.stop:
 					return
 				}
+			}
+			if veto != nil && veto() {
+				c.closeMaster()
+				return
 			}
 		}
 		c.write(line)

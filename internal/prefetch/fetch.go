@@ -63,10 +63,8 @@ func (d *Downloader) Fetch(ctx context.Context, uri, name string) (src metadata.
 	started := false
 	for attempt := 0; attempt <= d.cfg.Retries; attempt++ {
 		if attempt > 0 {
-			select {
-			case <-time.After(d.cfg.Backoff << (attempt - 1)):
-			case <-ctx.Done():
-				return src, "", ctx.Err()
+			if werr := d.wait(ctx, src, err, attempt); werr != nil {
+				return src, "", werr
 			}
 		}
 		var sum string
@@ -161,10 +159,13 @@ func (d *Downloader) fetchAttempt(ctx context.Context, src *metadata.Source, par
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusOK:
-	case resp.StatusCode >= 400 && resp.StatusCode < 500:
-		return "", 0, &fatalError{fmt.Errorf("%s: HTTP %s", src.URI, resp.Status)}
 	default:
-		return "", 0, fmt.Errorf("%s: HTTP %s", src.URI, resp.Status)
+		err := httpError(resp)
+		var fatal *fatalError
+		if errors.As(err, &fatal) {
+			return "", 0, &fatalError{fmt.Errorf("%s: %w", src.URI, fatal.err)}
+		}
+		return "", 0, fmt.Errorf("%s: %w", src.URI, err)
 	}
 	if resp.ContentLength > 0 {
 		free, err := d.cfg.FreeSpace(filepath.Dir(part))
