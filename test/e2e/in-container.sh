@@ -539,6 +539,17 @@ done
 [ -z "$(flatpak list --user --runtime --columns=ref)" ] || fail "runtimes pulled by the update"
 pass "both updated to their new commits and still run on $RUNTIME_BRANCH"
 
+step "force-runtime: rpak update -y with nothing to update says so once"
+# Patched apps split the update in the user installation (--no-deps) and
+# the system one; one with nothing to update is left out, so the command
+# gives one result, as flatpak update does. (flatpak 1.16 says
+# "Nothing to do.")
+rpak update -y > /tmp/fr-noop.log 2>&1 || { cat /tmp/fr-noop.log; fail "rpak update with nothing to update"; }
+n=$(grep -cE '^Nothing to (update|do)\.' /tmp/fr-noop.log || true)
+l=$(grep -c '^Looking for updates' /tmp/fr-noop.log || true)
+[ "$n" -eq 1 ] && [ "$l" -eq 1 ] || { cat /tmp/fr-noop.log; fail "nothing to update: $l transactions, $n \"Nothing to update/do.\""; }
+pass "one flatpak update, one \"Nothing to update/do.\""
+
 step "rpak patch (the list)"
 rpak patch | tee /tmp/fr-list.log
 for app in org.rpak.test.Plain org.rpak.test.Extra; do
