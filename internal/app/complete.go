@@ -231,6 +231,9 @@ func completeCommand(argv []string, stdout io.Writer) int {
 	case "patch":
 		c.patch(stdout, c.words[i+1:])
 		return 0
+	case "self-update":
+		c.selfUpdate(stdout, c.words[i+1:])
+		return 0
 	case "install", "update", "upgrade":
 		return c.withForceRuntime(stdout)
 	}
@@ -348,7 +351,7 @@ func (c *completion) flatpak(stdout io.Writer) int {
 }
 
 // ownCommands are the commands rpak adds to flatpak's.
-var ownCommands = []string{"clean", "completion", "doctor", "patch"}
+var ownCommands = []string{"clean", "completion", "doctor", "patch", "self-update"}
 
 // commands completes the command name: flatpak's candidates (commands, or
 // global options for "-"), and rpak's own commands. If flatpak cannot be
@@ -538,5 +541,27 @@ func (c *completion) doctor(stdout io.Writer, args []shellWord) {
 			continue
 		}
 		fmt.Fprintln(stdout, candidate)
+	}
+}
+
+// selfUpdate completes the options of rpak self-update that are not on the
+// line yet. Its VERSION is not completed: that would take the network.
+func (c *completion) selfUpdate(stdout io.Writer, args []shellWord) {
+	if !strings.HasPrefix(c.cur, "-") {
+		return
+	}
+	given := map[string]bool{}
+	for _, w := range args {
+		given[w.text] = true
+	}
+	for _, o := range [][]string{{"--check"}, {"--force"}, {"-y", "--yes"}, {"-h", "--help"}} {
+		if given[o[0]] || given[o[len(o)-1]] {
+			continue
+		}
+		for _, name := range o {
+			if word, ok := c.completeWord(name + " "); ok {
+				fmt.Fprintln(stdout, word)
+			}
+		}
 	}
 }

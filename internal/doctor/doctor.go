@@ -26,6 +26,7 @@ import (
 	"github.com/flatpark/rpak/internal/installation"
 	"github.com/flatpark/rpak/internal/plan"
 	"github.com/flatpark/rpak/internal/prefetch"
+	"github.com/flatpark/rpak/internal/release"
 )
 
 // Item is a line of the report: a fact, as collected.
@@ -70,8 +71,12 @@ type Config struct {
 	Uid    int
 	Euid   int
 	Kernel func() string
-	// ReleaseURL is the GitHub API URL of rpak's latest release.
-	ReleaseURL string
+	// ReleaseBase is where rpak's releases are (release.Base); "" checks
+	// no release.
+	ReleaseBase string
+	// SelfUpdate is false in a build that a package manager updates, which
+	// rpak self-update refuses to replace.
+	SelfUpdate bool
 	// Probes are the URLs always checked, besides the remotes.
 	Probes []string
 	Apps   []string
@@ -90,7 +95,7 @@ type Config struct {
 const FlatpakTimeout = 15 * time.Second
 
 // NewConfig is the configuration of the running process.
-func NewConfig(version, flatpak string, apps []string) Config {
+func NewConfig(version string, selfUpdate bool, flatpak string, apps []string) Config {
 	exe, _ := os.Executable()
 	home, _ := os.UserHomeDir()
 	var users []string
@@ -118,7 +123,8 @@ func NewConfig(version, flatpak string, apps []string) Config {
 		Uid:            os.Getuid(),
 		Euid:           os.Geteuid(),
 		Kernel:         kernelRelease,
-		ReleaseURL:     "https://api.github.com/repos/flatpark/rpak/releases/latest",
+		ReleaseBase:    release.Base(os.LookupEnv),
+		SelfUpdate:     selfUpdate,
 		Probes:         []string{"https://dl.flatpark.org/flatpark.flatpakrepo", "https://dl.flathub.org/repo/summary"},
 		Apps:           apps,
 		Arch:           flatpakArch(),

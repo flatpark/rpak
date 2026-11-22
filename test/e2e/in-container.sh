@@ -957,6 +957,58 @@ pass "file restored upstream, reset: from upstream as built"
 kill "$http_pid" 2>/dev/null || true
 unset no_proxy NO_PROXY
 
+step "rpak self-update from a release server shaped like GitHub's"
+# Two builds of this rpak as releases v0.0.1 and v0.0.2 (make e2e builds
+# them), served by release-server.py; v0.0.1 is installed behind a symlink,
+# as in ~/.local/bin, and updated to v0.0.2.
+su=/tmp/self-update
+releases=$su/www/releases/download
+case $(uname -m) in x86_64) goarch=amd64 ;; aarch64) goarch=arm64 ;; *) fail "no rpak release for $(uname -m)" ;; esac
+mkdir -p "$releases/v0.0.2" "$releases/v0.0.3" "$su/opt" "$su/bin"
+cp /out/self-update/v0.0.2/rpak "$releases/v0.0.2/rpak-linux-$goarch"
+(cd "$releases/v0.0.2" && sha256sum "rpak-linux-$goarch" > SHA256SUMS)
+# v0.0.3's SHA256SUMS does not match its binary.
+cp /out/self-update/v0.0.2/rpak "$releases/v0.0.3/rpak-linux-$goarch"
+echo "$(echo tampered | sha256sum | cut -c1-64)  rpak-linux-$goarch" > "$releases/v0.0.3/SHA256SUMS"
+echo v0.0.2 > "$su/www/latest"
+cp /out/self-update/v0.0.1/rpak "$su/opt/rpak"
+ln -s ../opt/rpak "$su/bin/rpak"
+old=$su/bin/rpak
+su_port=8766
+python3 /e2e/release-server.py "$su/www" "$su_port" > /tmp/release-server.log 2>&1 &
+su_pid=$!
+export RPAK_RELEASE_BASE=http://127.0.0.1:$su_port/releases
+for _ in $(seq 50); do python3 -c "import socket; socket.create_connection(('127.0.0.1', $su_port))" 2>/dev/null && break; sleep 0.1; done
+version() { "$old" --version > /tmp/version.log; head -1 /tmp/version.log; }
+[ "$(version)" = "rpak v0.0.1" ] || fail "the old release says $(version)"
+
+code=0
+"$old" self-update --check > /tmp/su.log 2>&1 || code=$?
+cat /tmp/su.log
+[ "$code" -eq 10 ] || fail "self-update --check with a newer release exited $code, not 10"
+pass "self-update --check: 10 with a newer release"
+code=0
+"$old" self-update -y v0.0.3 > /tmp/su.log 2>&1 || code=$?
+cat /tmp/su.log
+[ "$code" -eq 1 ] && grep -q "checksum mismatch" /tmp/su.log || fail "self-update to a release with a wrong checksum: exit $code"
+[ "$(version)" = "rpak v0.0.1" ] || fail "replaced despite the wrong checksum"
+"$old" self-update -y > /tmp/su.log 2>&1 || { cat /tmp/su.log; fail "rpak self-update -y"; }
+cat /tmp/su.log
+grep -qx "rpak updated: v0.0.1 → v0.0.2  $su/opt/rpak" /tmp/su.log || fail "rpak self-update -y: no update reported"
+[ "$(version)" = "rpak v0.0.2" ] || fail "after self-update: $(version)"
+[ -L "$su/bin/rpak" ] || fail "the symlink was replaced"
+[ -z "$(ls -A "$su/opt" | grep -vx rpak)" ] || fail "left in $su/opt: $(ls -A "$su/opt")"
+pass "self-update -y: v0.0.1 → v0.0.2 behind the symlink, a wrong checksum refused, nothing left behind"
+code=0
+"$old" self-update --check > /tmp/su.log 2>&1 || code=$?
+cat /tmp/su.log
+[ "$code" -eq 0 ] && grep -qx "rpak v0.0.2 is the latest release" /tmp/su.log || fail "self-update --check when up to date exited $code"
+"$old" doctor > /tmp/doctor.log 2>&1 || { cat /tmp/doctor.log; fail "rpak doctor after self-update"; }
+grep -E "^  rpak v0.0.2 .*\(latest release v0.0.2\)$" /tmp/doctor.log || fail "rpak doctor: no latest release v0.0.2"
+pass "self-update --check: 0 when up to date; doctor sees the release"
+kill "$su_pid" 2>/dev/null || true
+unset RPAK_RELEASE_BASE
+
 step "final checks"
 flatpak repair --user > /tmp/repair.log 2>&1 || { cat /tmp/repair.log; fail "flatpak repair failed"; }
 pass "flatpak repair --user"

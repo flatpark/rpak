@@ -13,7 +13,7 @@ var envVars = []struct {
 	name   string
 	always bool
 }{
-	{"RPAK_FLATPAK", true}, {"RPAK_JOBS", true}, {"RPAK_DRY_RUN", true},
+	{"RPAK_FLATPAK", true}, {"RPAK_JOBS", true}, {"RPAK_DRY_RUN", true}, {"RPAK_RELEASE_BASE", false},
 	{"FLATPAK_USER_DIR", false}, {"FLATPAK_SYSTEM_DIR", false}, {"FLATPAK_CONFIG_DIR", false},
 	{"XDG_DATA_HOME", false}, {"XDG_DATA_DIRS", true},
 	{"XDG_CURRENT_DESKTOP", true}, {"XDG_SESSION_TYPE", true}, {"DESKTOP_SESSION", false},
@@ -41,6 +41,9 @@ func (d *doctor) envSection() Section {
 			n, _ := prefetch.ParseJobs(value)
 			s.add("RPAK_JOBS=%s  (%d downloads at a time)", shown, n)
 			continue
+		}
+		if v.name == "RPAK_RELEASE_BASE" {
+			shown = RedactURL(shown) // a mirror may take a password
 		}
 		s.add("%s=%s", v.name, shown)
 	}
