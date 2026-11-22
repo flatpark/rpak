@@ -54,8 +54,36 @@ Proceed with these changes to the user installation? [Y/n]:
 
 Answering `n` cancels; what was downloaded is kept for the next run. With
 `-y`, or when not on a terminal, rpak downloads first and then runs
-flatpak. A failed download never stops the install: flatpak then downloads
-that file itself.
+flatpak. A failed download is retried 4 times, after 2, 4, 8 and 16
+seconds (a dead link, HTTP 4xx, is not), and never stops the install:
+flatpak then downloads that file itself.
+
+#### A file replaced upstream
+
+Some vendors rebuild a release under the same download link. The app's
+pin then no longer matches, and flatpak refuses the file until the app is
+repinned. rpak notices before flatpak does. It first asks each server for
+the file's size and checksum (a `HEAD` request), and checks every file it
+downloads. When the file has changed, it says so and offers to install the
+app with the file as it is now:
+
+```
+rpak: com.example.App: app.deb is not the file the app was built with; upstream has likely replaced it at the same URL.
+rpak:   URL:        https://example.com/download/app.deb
+rpak:   built with: 180.1 MB, sha256 1c0f…
+rpak:   served now: 184.4 MB, sha256 9a85…
+Install com.example.App with the file as it is now, as an experimental extra-data patch (its packagers did not check it)? [y/N]:
+```
+
+`y` makes it an [`--extra-data`](#--extra-data) patch from the same URL,
+using the file rpak has already downloaded. The patch goes away by itself
+once the app is repinned. With `n`, the command runs as given, and flatpak
+fails on that app. If the server gives the size or checksum, rpak asks
+before anything is downloaded. Otherwise it asks once the download is
+done: in interactive mode, flatpak is stopped at its question, so that it
+does not download the file again only to fail. With `-y`, or when not on a
+terminal, rpak only prints the command to run. Only apps of the user
+installation can be patched.
 
 ### clean
 

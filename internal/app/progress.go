@@ -134,6 +134,7 @@ func (r *reporter) watch(cfg prefetch.Config, download func(prefetch.Config) (pr
 	cfg.OnStart = r.started
 	cfg.OnProgress = r.progress
 	cfg.OnDone = r.done
+	cfg.OnRetry = r.retry
 	start := r.now()
 	r.mu.Lock()
 	r.rate.add(start, 0)
@@ -222,6 +223,24 @@ func (r *reporter) done(s metadata.Source, res prefetch.Result) {
 	r.drawLocked([]line{l}, false)
 }
 
+// retry tells that s is tried again after wait.
+func (r *reporter) retry(s metadata.Source, err error, wait time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.quiet {
+		return
+	}
+	name := sanitize(s.Name)
+	if !r.term.redraw {
+		r.printf("rpak: %s retrying %s in %s: %s\n", r.stamp(), name, elapsed(wait), errText(err))
+		return
+	}
+	l := line{{"  ", ""}, {"↻", sgrYellow}, {" ", ""}}
+	l.add(name, "")
+	l.add(fmt.Sprintf("  retrying in %s: %s", elapsed(wait), errText(err)), sgrFaint)
+	r.drawLocked([]line{l}, false)
+}
+
 // event is the text of a line-mode done line. Logs and tests look for
 // "done NAME", "reusing NAME", "skipping NAME" and "flatpak will download".
 func (r *reporter) event(s metadata.Source, res prefetch.Result, a *active) string {
@@ -233,6 +252,8 @@ func (r *reporter) event(s metadata.Source, res prefetch.Result, a *active) stri
 		return fmt.Sprintf("reusing %s from an earlier run", name)
 	case prefetch.Skipped:
 		return fmt.Sprintf("skipping %s: %s", name, errText(res.Err))
+	case prefetch.Changed:
+		return fmt.Sprintf("warning: %s was replaced upstream: the server has %s, sha256 %s", name, humanSize(res.Got.Size), res.Got.Checksum)
 	default:
 		return fmt.Sprintf("warning: %s: %s; flatpak will download it", name, errText(res.Err))
 	}
@@ -270,6 +291,9 @@ func (r *reporter) resultLine(s metadata.Source, res prefetch.Result, a *active)
 	case prefetch.Skipped:
 		mark, markSGR, detailSGR = "-", sgrYellow, ""
 		detail = "skipped: " + errText(res.Err)
+	case prefetch.Changed:
+		mark, markSGR, detailSGR = "✗", sgrYellow, ""
+		detail = "replaced upstream: the server has " + humanSize(res.Got.Size)
 	default:
 		mark, markSGR, detailSGR = "✗", sgrRed, ""
 		detail = errText(res.Err) + "; flatpak will download it"

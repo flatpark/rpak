@@ -31,10 +31,12 @@ type Config struct {
 	Jobs    int // concurrent downloads in total
 	PerHost int // concurrent downloads per host
 
-	Client      *http.Client
-	IdleTimeout time.Duration // fail when no data arrives for this long
-	Retries     int           // attempts after the first one
-	Backoff     time.Duration // before the first retry, doubled after that
+	Client       *http.Client
+	IdleTimeout  time.Duration // fail when no data arrives for this long
+	Retries      int           // attempts after the first one
+	Backoff      time.Duration // before the first retry, doubled after that
+	MaxBackoff   time.Duration // the longest wait between attempts
+	ProbeTimeout time.Duration // for each request of Probe
 
 	// FreeSpace reports the bytes available to us on dir's filesystem.
 	FreeSpace func(dir string) (uint64, error)
@@ -43,24 +45,33 @@ type Config struct {
 	OnStart    func(metadata.Source)
 	OnProgress func(s metadata.Source, bytes int64)
 	OnDone     func(metadata.Source, Result)
+	// OnRetry is called before waiting wait to try s again after err.
+	OnRetry func(s metadata.Source, err error, wait time.Duration)
 }
 
 // NewConfig returns the default configuration: 4 downloads at a time, at
-// most 4 per host (like the patched flatpak), 30s to connect and to get response headers, 60s without
-// data counts as a failure, 2 retries with exponential backoff.
+// most 4 per host (like the patched flatpak), 30s to connect and to get
+// response headers, 60s without data counts as a failure, 4 retries
+// waiting 2s, 4s, 8s and 16s: long enough to ride out a flaky resolver or
+// a dropped connection, which is what fails most downloads.
 func NewConfig(baseDir, version string) Config {
 	return Config{
-		BaseDir:     baseDir,
-		Version:     version,
-		Jobs:        4,
-		PerHost:     4,
-		Client:      NewHTTPClient(),
-		IdleTimeout: 60 * time.Second,
-		Retries:     2,
-		Backoff:     time.Second,
-		FreeSpace:   freeSpace,
+		BaseDir:      baseDir,
+		Version:      version,
+		Jobs:         4,
+		PerHost:      4,
+		Client:       NewHTTPClient(),
+		IdleTimeout:  60 * time.Second,
+		Retries:      4,
+		Backoff:      DefaultBackoff,
+		MaxBackoff:   30 * time.Second,
+		ProbeTimeout: 5 * time.Second,
+		FreeSpace:    freeSpace,
 	}
 }
+
+// DefaultBackoff is NewConfig's Backoff; tests of the command shorten it.
+var DefaultBackoff = 2 * time.Second
 
 // NewHTTPClient returns a client that honours HTTP(S)_PROXY and NO_PROXY.
 func NewHTTPClient() *http.Client {
@@ -107,13 +118,22 @@ const (
 	Skipped                  // left to flatpak, not an error (e.g. a file of someone else's is there)
 	Failed                   // left to flatpak because something went wrong
 	Canceled                 // interrupted; the .part file is kept
+	// Changed: the server gave a whole file, but not the one of the
+	// source: upstream replaced it under the same URL. Result.Got is what
+	// came, kept in the directory of its own checksum (Result.Dir), where
+	// flatpak only finds it for a commit that has that checksum (an
+	// extra-data patch). flatpak downloads the source itself, and fails.
+	Changed
 )
 
 // Result is the outcome for one source.
 type Result struct {
 	Status Status
-	Err    error // why, for Skipped, Failed and Canceled
+	Err    error // why, for Skipped, Failed, Canceled and Changed
 	Dir    string
+	// Got is the file the server has now, for Changed: the source with
+	// its real size and checksum.
+	Got metadata.Source
 }
 
 // Summary is the outcome of DownloadAll.
@@ -122,6 +142,18 @@ type Summary struct {
 	// Dirs are the marked directories that now hold verified files; they
 	// are to be removed once flatpak has used them.
 	Dirs []string
+	// Changed are the sources whose file was replaced upstream, with
+	// what is there now (Status Changed).
+	Changed []Change
+}
+
+// Change is a source whose URL serves another file than the one the
+// source was made from. Got has the size and checksum found: from the
+// downloaded file (Dir holds it), or as a server announced them (Probe):
+// the size, the checksum if it gave one ("" if not), no Dir.
+type Change struct {
+	Source, Got metadata.Source
+	Dir         string
 }
 
 // Downloader fetches extra-data sources into the flatpak user base dir.
@@ -147,6 +179,12 @@ func New(cfg Config) *Downloader {
 	}
 	if cfg.Backoff <= 0 {
 		cfg.Backoff = def.Backoff
+	}
+	if cfg.MaxBackoff <= 0 {
+		cfg.MaxBackoff = def.MaxBackoff
+	}
+	if cfg.ProbeTimeout <= 0 {
+		cfg.ProbeTimeout = def.ProbeTimeout
 	}
 	if cfg.FreeSpace == nil {
 		cfg.FreeSpace = def.FreeSpace
@@ -204,6 +242,8 @@ func (d *Downloader) DownloadAll(ctx context.Context, sources []metadata.Source)
 			summary.Failed++
 		case Canceled:
 			summary.Canceled++
+		case Changed:
+			summary.Changed = append(summary.Changed, Change{Source: s, Got: r.Got, Dir: r.Dir})
 		}
 		mu.Unlock()
 		if d.cfg.OnDone != nil {
@@ -300,6 +340,10 @@ func (d *Downloader) fetch(ctx context.Context, sources []metadata.Source) ([]Re
 			if ctx.Err() != nil {
 				return fail(Canceled, err)
 			}
+			var changed *changedError
+			if errors.As(err, &changed) {
+				return d.keepChanged(sources, target+".part", changed)
+			}
 			return fail(Failed, err)
 		}
 		status = Downloaded
@@ -334,10 +378,8 @@ func (d *Downloader) download(ctx context.Context, s metadata.Source, target str
 	var err error
 	for attempt := 0; attempt <= d.cfg.Retries; attempt++ {
 		if attempt > 0 {
-			select {
-			case <-time.After(d.cfg.Backoff << (attempt - 1)):
-			case <-ctx.Done():
-				return ctx.Err()
+			if err := d.wait(ctx, s, err, attempt); err != nil {
+				return err
 			}
 		}
 		err = d.attempt(ctx, s, part)
@@ -354,8 +396,31 @@ func (d *Downloader) download(ctx context.Context, s metadata.Source, target str
 		if errors.As(err, &fatal) {
 			return fatal.err
 		}
+		var changed *changedError
+		if errors.As(err, &changed) {
+			return err
+		}
 	}
 	return err
+}
+
+// wait waits before attempt (1 for the first retry) after err: Backoff,
+// doubled for each retry, at most MaxBackoff.
+func (d *Downloader) wait(ctx context.Context, s metadata.Source, err error, attempt int) error {
+	delay := d.cfg.Backoff
+	for i := 1; i < attempt && delay < d.cfg.MaxBackoff; i++ {
+		delay *= 2
+	}
+	delay = min(delay, d.cfg.MaxBackoff)
+	if d.cfg.OnRetry != nil {
+		d.cfg.OnRetry(s, err, delay)
+	}
+	select {
+	case <-time.After(delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // fatalError is a failure that retrying does not fix.
@@ -363,9 +428,95 @@ type fatalError struct{ err error }
 
 func (e *fatalError) Error() string { return e.err.Error() }
 
+// changedError is a whole file that is not the source's: what came, still
+// in the part file.
+type changedError struct {
+	size     int64
+	checksum string
+}
+
+func (e *changedError) Error() string {
+	return fmt.Sprintf("the server has another file now (%s, sha256 %s)", FormatBytes(e.size), e.checksum)
+}
+
+// httpError is a response other than the file; 4xx other than 408 and 429
+// are fatal: the URL is wrong, asking again does not help.
+func httpError(resp *http.Response) error {
+	err := fmt.Errorf("HTTP %s", resp.Status)
+	if c := resp.StatusCode; c >= 400 && c < 500 && c != http.StatusRequestTimeout && c != http.StatusTooManyRequests {
+		return &fatalError{err}
+	}
+	return err
+}
+
+// framed reports whether the end of resp's body is announced, so that a
+// clean end of it is the end of the file and not a dropped connection.
+func framed(resp *http.Response) bool {
+	if resp.ContentLength >= 0 || resp.ProtoMajor >= 2 {
+		return true
+	}
+	for _, te := range resp.TransferEncoding {
+		if strings.EqualFold(te, "chunked") {
+			return true
+		}
+	}
+	return false
+}
+
+// keepChanged moves the part file of a changed source to the directory of
+// its own checksum, which is rpak's (marked) and expires like any other.
+func (d *Downloader) keepChanged(sources []metadata.Source, part string, changed *changedError) ([]Result, string) {
+	results := make([]Result, len(sources))
+	first := sources[0]
+	got := first
+	got.Size, got.Checksum = changed.size, changed.checksum
+	fail := func(err error) ([]Result, string) {
+		os.Remove(part)
+		for i := range results {
+			results[i] = Result{Status: Failed, Err: fmt.Errorf("%v; keeping it: %w", changed, err)}
+		}
+		return results, ""
+	}
+	dir := ExtraDataDir(d.cfg.BaseDir, got.Checksum)
+	marker := fmt.Sprintf("rpak %s %s\n", d.cfg.Version, time.Now().UTC().Format(time.RFC3339))
+	owned, err := claimDir(dir, marker)
+	if err != nil {
+		return fail(err)
+	}
+	if !owned {
+		return fail(errForeign)
+	}
+	if err := os.Rename(part, filepath.Join(dir, first.Name)); err != nil {
+		return fail(err)
+	}
+	if err := syncDir(dir); err != nil {
+		return fail(err)
+	}
+	for i, s := range sources {
+		g := got
+		g.Ref, g.Name = s.Ref, s.Name
+		if i > 0 && s.Name != first.Name {
+			alias := filepath.Join(dir, s.Name)
+			os.Remove(alias)
+			if err := os.Link(filepath.Join(dir, first.Name), alias); err != nil {
+				results[i] = Result{Status: Failed, Err: err}
+				continue
+			}
+		}
+		results[i] = Result{Status: Changed, Err: changed, Dir: dir, Got: g}
+	}
+	return results, ""
+}
+
 // attempt makes one request, resuming part if it exists, and leaves a
 // verified, synced part file on success. A part file with wrong content is
 // removed; one that is merely incomplete is kept for the next attempt.
+//
+// The body is read to its end even when it is not what the source says
+// (another size announced, more bytes than expected): a whole file that
+// came in one response but is not the source's is upstream's new one, a
+// *changedError, kept in part. One that was resumed is not trusted (the
+// first part may be of the old file) and is started over.
 func (d *Downloader) attempt(ctx context.Context, s metadata.Source, part string) error {
 	f, err := os.OpenFile(part, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
@@ -382,7 +533,15 @@ func (d *Downloader) attempt(ctx context.Context, s metadata.Source, part string
 		h.Reset()
 	}
 	if offset == s.Size {
-		return d.finish(f, h, s, part)
+		if err := d.finish(f, h, s, part); err == nil {
+			return nil
+		}
+		// A whole part file of other content: start over.
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
+		offset = 0
+		h.Reset()
 	}
 
 	free, err := d.cfg.FreeSpace(filepath.Dir(part))
@@ -409,22 +568,35 @@ func (d *Downloader) attempt(ctx context.Context, s metadata.Source, part string
 	}
 	defer resp.Body.Close()
 
+	resumed := false
 	switch {
 	case resp.StatusCode == http.StatusPartialContent && offset > 0:
-		if start, ok := contentRangeStart(resp.Header.Get("Content-Range")); !ok || start != offset {
+		start, total, ok := contentRange(resp.Header.Get("Content-Range"))
+		if !ok || start != offset {
 			// Not the range we asked for; start over next time.
 			os.Remove(part)
 			return fmt.Errorf("bad Content-Range %q for offset %d", resp.Header.Get("Content-Range"), offset)
 		}
+		if total >= 0 && total != s.Size {
+			// Another file than the one we have the start of.
+			os.Remove(part)
+			return fmt.Errorf("the file on the server is %d bytes, not %d; starting over", total, s.Size)
+		}
+		resumed = true
 	case resp.StatusCode == http.StatusOK:
 		// The server ignored the Range header: start from scratch.
 		offset = 0
 		h.Reset()
+		if resp.ContentLength > s.Size {
+			if free < uint64(resp.ContentLength) {
+				return &fatalError{fmt.Errorf("not enough free space: need %s, have %s", FormatBytes(resp.ContentLength), FormatBytes(int64(free)))}
+			}
+		}
 	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0:
 		os.Remove(part)
 		return fmt.Errorf("server rejected resuming at %d", offset)
 	default:
-		return fmt.Errorf("HTTP %s", resp.Status)
+		return httpError(resp)
 	}
 	if err := f.Truncate(offset); err != nil {
 		return err
@@ -440,19 +612,18 @@ func (d *Downloader) attempt(ctx context.Context, s metadata.Source, part string
 	defer idle.Stop()
 	w := io.MultiWriter(f, h)
 	buf := make([]byte, 256*1024)
-	// Read at most one byte more than expected to notice oversized bodies.
-	body := io.LimitReader(resp.Body, s.Size-offset+1)
 	for {
-		n, rerr := body.Read(buf)
+		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
 			idle.Reset(d.cfg.IdleTimeout)
 			if _, err := w.Write(buf[:n]); err != nil {
 				return err
 			}
-			offset += int64(n)
-			if d.cfg.OnProgress != nil {
-				d.cfg.OnProgress(s, int64(n))
+			// Progress counts what the source expects, no more.
+			if counted := min(int64(n), max(s.Size-offset, 0)); counted > 0 && d.cfg.OnProgress != nil {
+				d.cfg.OnProgress(s, counted)
 			}
+			offset += int64(n)
 		}
 		if rerr == io.EOF {
 			break
@@ -464,40 +635,65 @@ func (d *Downloader) attempt(ctx context.Context, s metadata.Source, part string
 			return rerr
 		}
 	}
-	return d.finish(f, h, s, part)
+	err = d.finish(f, h, s, part)
+	if err == nil {
+		return nil
+	}
+	switch {
+	case resumed:
+		// Unknown which file the start was of.
+		os.Remove(part)
+		return fmt.Errorf("%v after resuming; starting over", err)
+	case offset < s.Size && !framed(resp):
+		// The connection may just have closed early: resume next time.
+		return err
+	case offset == 0:
+		os.Remove(part)
+		return fmt.Errorf("%s: the server sent an empty file", s.URI)
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return &changedError{size: offset, checksum: hex.EncodeToString(h.Sum(nil))}
 }
 
-// finish checks a complete-looking part file and syncs it to disk.
+// finish checks a complete-looking part file and syncs it to disk; it
+// changes nothing when the file is not the source's.
 func (d *Downloader) finish(f *os.File, h hash.Hash, s metadata.Source, part string) error {
 	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
 	if info.Size() != s.Size {
-		if info.Size() > s.Size {
-			os.Remove(part)
-		}
 		return fmt.Errorf("size mismatch: got %d bytes, want %d", info.Size(), s.Size)
 	}
 	if sum := hex.EncodeToString(h.Sum(nil)); sum != s.Checksum {
-		os.Remove(part)
 		return fmt.Errorf("checksum mismatch: got %s", sum)
 	}
 	return f.Sync()
 }
 
-// contentRangeStart parses the first byte position of "bytes START-END/TOTAL".
-func contentRangeStart(v string) (int64, bool) {
+// contentRange parses "bytes START-END/TOTAL"; total is -1 for "*".
+func contentRange(v string) (start, total int64, ok bool) {
 	rest, ok := strings.CutPrefix(v, "bytes ")
 	if !ok {
-		return 0, false
+		return 0, 0, false
 	}
-	start, _, ok := strings.Cut(rest, "-")
+	first, rest, ok := strings.Cut(rest, "-")
 	if !ok {
-		return 0, false
+		return 0, 0, false
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(start), 10, 64)
-	return n, err == nil
+	start, err := strconv.ParseInt(strings.TrimSpace(first), 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	total = -1
+	if _, t, ok := strings.Cut(rest, "/"); ok && strings.TrimSpace(t) != "*" {
+		if total, err = strconv.ParseInt(strings.TrimSpace(t), 10, 64); err != nil {
+			return 0, 0, false
+		}
+	}
+	return start, total, true
 }
 
 // verifyFile checks that path is a regular file of the given size and

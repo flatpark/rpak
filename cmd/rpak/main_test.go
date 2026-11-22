@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/flatpark/rpak/internal/app"
+	"github.com/flatpark/rpak/internal/prefetch"
 )
 
 func TestMain(m *testing.M) {
@@ -40,6 +41,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if os.Getenv("RPAK_TEST_AS_MAIN") == "1" {
+		prefetch.DefaultBackoff = time.Millisecond
 		os.Exit(app.Main("test"))
 	}
 	os.Exit(m.Run())
@@ -145,14 +147,15 @@ esac
 `
 
 type env struct {
-	t    *testing.T
-	fake string // $FAKE_DIR
-	base string // FLATPAK_USER_DIR
-	sys  string // FLATPAK_SYSTEM_DIR; FLATPAK_CONFIG_DIR is empty
-	conf string
-	home string // HOME if set, else a new temporary directory per run
-	srv  *httptest.Server
-	hits atomic.Int64
+	t     *testing.T
+	fake  string // $FAKE_DIR
+	base  string // FLATPAK_USER_DIR
+	sys   string // FLATPAK_SYSTEM_DIR; FLATPAK_CONFIG_DIR is empty
+	conf  string
+	home  string // HOME if set, else a new temporary directory per run
+	srv   *httptest.Server
+	hits  atomic.Int64
+	heads atomic.Int64
 
 	// Set up by the test before rpak runs; the race detector cannot see
 	// that ordering across the process boundary, hence the lock.
@@ -177,10 +180,16 @@ func (e *env) file(path string) ([]byte, bool) {
 func newEnv(t *testing.T) *env {
 	e := &env{t: t, fake: t.TempDir(), base: t.TempDir(), sys: t.TempDir(), conf: t.TempDir(), files: make(map[string][]byte)}
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		e.hits.Add(1)
 		e.mu.Lock()
 		handler := e.handler
 		e.mu.Unlock()
+		// hits are downloads; the probes (HEAD) get the files as they are.
+		if r.Method == http.MethodHead {
+			e.heads.Add(1)
+			handler = nil
+		} else {
+			e.hits.Add(1)
+		}
 		if handler != nil && handler(w, r) {
 			return
 		}
@@ -415,8 +424,11 @@ func TestServerErrorStillRunsFlatpak(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("file exists after failed download: %v", err)
 	}
-	if e.hits.Load() != 3 {
-		t.Errorf("requests = %d, want 3 (2 retries)", e.hits.Load())
+	if e.hits.Load() != 5 {
+		t.Errorf("requests = %d, want 5 (4 retries)", e.hits.Load())
+	}
+	if !strings.Contains(out.stderr, "retrying com.example.One.deb in") {
+		t.Errorf("no retry line:\n%s", out.stderr)
 	}
 	t.Logf("took %v with retries", time.Since(start))
 }

@@ -161,6 +161,22 @@ func run(version string, argv []string) int {
 // prefetches, runs flatpak, removes what it prefetched and frees the
 // extra-data flatpak cached, and returns flatpak's exit code.
 func runFlatpak(version, kind string, argv []string, i int) int {
+	return runFlatpakWith(version, kind, argv, i, false).code
+}
+
+// flatpakRun is the outcome of runFlatpakWith: the exit code, the apps to
+// patch, and whether flatpak was stopped at its question (see
+// runInteractive) for a file replaced upstream.
+type flatpakRun struct {
+	code    int
+	patch   []changeJob
+	stopped bool
+}
+
+// runFlatpakWith is runFlatpak; with offer, it offers to patch apps whose
+// files were replaced upstream (see changed.go) and returns those to
+// patch: flatpak then did not run, or stopped, or failed.
+func runFlatpakWith(version, kind string, argv []string, i int, offer bool) flatpakRun {
 	flatpakArgs := argv[i+1:]
 	flatpak := flatpakPath()
 
@@ -190,8 +206,13 @@ func runFlatpak(version, kind string, argv []string, i int) int {
 		}
 	}()
 
-	prep := prefetchPhase(ctx, version, kind, flatpak, flatpakArgs, argv)
+	prep := prefetchPhase(ctx, version, kind, flatpak, flatpakArgs, argv, offer)
 	defer prep.unlock()
+	if len(prep.patch) > 0 {
+		// Asked before flatpak: the patch runs instead. What was
+		// prefetched stays for it.
+		return flatpakRun{patch: prep.patch}
+	}
 
 	cmd := exec.Command(flatpak, argv...)
 	// flatpak prints argv[0] in its usage ("Usage: flatpak install ...");
@@ -223,14 +244,26 @@ func runFlatpak(version, kind string, argv []string, i int) int {
 	if prep.console != nil {
 		var started bool
 		if code, started = prep.runInteractive(ctx, cmd, start); !started {
-			return code
+			return flatpakRun{code: code}
 		}
 	} else {
 		var started bool
 		if code, started = start(); !started {
-			return code
+			return flatpakRun{code: code}
 		}
 		code = exitCode(cmd.Wait())
+	}
+	mu.Lock()
+	child = nil
+	mu.Unlock()
+	// Found while flatpak was asking (interactive mode): flatpak has
+	// downloaded the file itself and failed on it.
+	var patch []changeJob
+	if prep.stopped && ctx.Err() == nil {
+		fmt.Fprintf(os.Stderr, "\nrpak: Stopped flatpak at its question: it would download a file that was replaced upstream, and fail.\n")
+	}
+	if code != 0 && len(prep.changed) > 0 && ctx.Err() == nil {
+		patch = offerChanges(ctx, os.Stderr, os.Stdin, kind, prep.changed, prep.origins, prep.offer)
 	}
 
 	// Remove what we placed only when flatpak succeeded; after a failure or
@@ -249,7 +282,7 @@ func runFlatpak(version, kind string, argv []string, i int) int {
 	if code == 0 && prep.parsed.SkipReason != "--help" && !prep.parsed.NoDeploy {
 		reclaim(prep.parsed.Installations, os.Stderr)
 	}
-	return code
+	return flatpakRun{code: code, patch: patch, stopped: prep.stopped}
 }
 
 // exitCode turns flatpak's exit status into rpak's: the same code, or
@@ -285,6 +318,16 @@ type prepared struct {
 	console *console
 	sources []metadata.Source
 	cfg     prefetch.Config
+
+	// origins are the plan's; changed are the files found replaced
+	// upstream in interactive mode, to tell about after flatpak; patch
+	// are the apps to patch instead of running flatpak.
+	origins map[[2]string][]plan.Origin
+	changed []prefetch.Change
+	patch   []changeJob
+	// offer is runFlatpakWith's; stopped reports that flatpak was stopped
+	// at its question for a changed file.
+	offer, stopped bool
 }
 
 // runInteractive starts flatpak with its stdin on the pseudo-terminal and
@@ -314,18 +357,36 @@ func (prep *prepared) runInteractive(ctx context.Context, cmd *exec.Cmd, start f
 		summary = rep.run(ctx, prep.cfg, prep.sources)
 		complete = ctx.Err() == nil
 	}()
+	// A file replaced upstream: flatpak would download it and fail; it is
+	// stopped at its question instead, and rpak asks its own (see
+	// runFlatpakWith).
+	var veto func() bool
+	if prep.offer {
+		veto = func() bool {
+			select {
+			case <-done:
+				if complete && len(summary.Changed) > 0 {
+					prep.stopped = true
+					return true
+				}
+			default:
+			}
+			return false
+		}
+	}
 	stop := c.start(func() <-chan struct{} {
 		if rep.show() {
 			return done
 		}
 		return nil
-	})
+	}, veto)
 	code = exitCode(cmd.Wait())
 	stop()
 	cancel()
 	<-done
 	if complete {
 		prep.dirs = summary.Dirs
+		prep.changed = summary.Changed
 		writeLines(os.Stderr, t, []line{rep.summary(summary)})
 	}
 	return code, true
@@ -335,13 +396,13 @@ func (prep *prepared) runInteractive(ctx context.Context, cmd *exec.Cmd, start f
 // "install"); fullArgv is what flatpak will get, for the dry-run output.
 // It never fails: problems are reported as warnings and only reduce what
 // is prefetched.
-func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpakArgs, fullArgv []string) prepared {
+func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpakArgs, fullArgv []string, offer bool) prepared {
 	warn := func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, "rpak: warning: "+format+"\n", a...)
 	}
 	dryRun := os.Getenv("RPAK_DRY_RUN") != "" && os.Getenv("RPAK_DRY_RUN") != "0"
 	parsed := args.Parse(command, flatpakArgs)
-	prep := prepared{parsed: parsed, runFlatpak: !dryRun, unlock: func() {}}
+	prep := prepared{parsed: parsed, runFlatpak: !dryRun, unlock: func() {}, offer: offer && canAsk(parsed)}
 
 	baseDir, err := prefetch.DefaultUserBaseDir()
 	if err != nil {
@@ -397,20 +458,43 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 
 	cfg := prefetch.NewConfig(baseDir, version)
 	cfg.Jobs = jobs(warn)
+	prep.origins = p.Origins
+	sources := withoutChanged(p.Sources, nil)
+	ask := offer && canAsk(parsed)
+	if offer {
+		// Before flatpak shows anything: the servers that tell the size or
+		// the checksum of their files show a replaced one at once.
+		changes := prefetch.New(cfg).Probe(ctx, sources)
+		if ctx.Err() != nil {
+			return prep
+		}
+		if len(changes) > 0 {
+			if prep.patch = offerChanges(ctx, os.Stderr, os.Stdin, command, changes, p.Origins, ask); len(prep.patch) > 0 || ctx.Err() != nil {
+				return prep
+			}
+			sources = withoutChanged(sources, changes)
+		}
+	}
+	if len(sources) == 0 {
+		return prep
+	}
 	if interactive(parsed) == "" {
 		c, err := openConsole()
 		if err == nil {
-			prep.console, prep.sources, prep.cfg = c, p.Sources, cfg
+			prep.console, prep.sources, prep.cfg = c, sources, cfg
 			return prep
 		}
 		warnSequential(err)
 	}
-	printPlan(os.Stderr, p.Sources, "")
-	summary := download(ctx, cfg, p.Sources)
+	printPlan(os.Stderr, sources, "")
+	summary := download(ctx, cfg, sources)
 	if ctx.Err() != nil {
 		return prep
 	}
 	prep.dirs = summary.Dirs
+	if len(summary.Changed) > 0 {
+		prep.patch = offerChanges(ctx, os.Stderr, os.Stdin, command, summary.Changed, p.Origins, ask)
+	}
 	return prep
 }
 

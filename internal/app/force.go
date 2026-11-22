@@ -38,22 +38,53 @@ import (
 // command.
 func transaction(version, kind string, argv []string, i int) int {
 	parsed := args.Parse(kind, argv[i+1:])
-	if !parsed.ForceRuntime && len(parsed.ExtraData) == 0 {
-		user, err := prefetch.DefaultUserBaseDir()
-		if err != nil || !fr.HasRecords(user) || parsed.SkipReason == "--help" ||
-			(kind == "install" && parsed.SkipReason != "") {
-			return runFlatpak(version, kind, argv, i)
-		}
+	plain := !parsed.ForceRuntime && len(parsed.ExtraData) == 0
+	if plain && !hasRecords(parsed) {
+		return afterRun(version, kind, argv, i, parsed, runFlatpakWith(version, kind, argv, i, true))
 	}
 	f, code, ok := newForceFlow(version, kind, argv, i, parsed, os.Stderr)
 	if !ok {
 		return code
 	}
-	defer f.close()
+	// Without patch options, the command as given (normal) may offer to
+	// patch a file replaced upstream; that is done once the flow is over
+	// and its lock released.
+	f.offer = plain
 	if kind == "install" {
-		return f.install()
+		code = f.install()
+	} else {
+		code = f.update()
 	}
-	return f.update()
+	f.close()
+	if f.offered != nil {
+		return afterRun(version, kind, argv, i, parsed, *f.offered)
+	}
+	return code
+}
+
+// afterRun finishes a run of the command that offered to patch files
+// replaced upstream: it patches those accepted, or runs the command again
+// if flatpak was stopped for them in vain.
+func afterRun(version, kind string, argv []string, i int, parsed args.Parsed, run flatpakRun) int {
+	switch {
+	case len(run.patch) > 0:
+		return patchChanges(version, kind, argv, i, parsed, run.patch)
+	case run.stopped && run.code != 0:
+		// Not patched after all: the command as asked, without the files
+		// declined (flatpak fails on them).
+		fmt.Fprintf(os.Stderr, "rpak: Running the command again\n")
+		return transaction(version, kind, argv, i)
+	}
+	return run.code
+}
+
+// hasRecords reports whether the command goes through the patch flow
+// without patch options: there are records and the command pulls from a
+// remote.
+func hasRecords(parsed args.Parsed) bool {
+	user, err := prefetch.DefaultUserBaseDir()
+	return err == nil && fr.HasRecords(user) && parsed.SkipReason != "--help" &&
+		(parsed.Command != "install" || parsed.SkipReason == "")
 }
 
 // forceFlow is an install or update that forces runtimes, or keeps them
@@ -94,8 +125,12 @@ type forceFlow struct {
 	fetched []string
 	ran     bool
 	// warned are the apps whose experimental line has been printed.
-	warned   map[string]bool
-	dryRun   bool
+	warned map[string]bool
+	dryRun bool
+	// offer: normal may offer to patch files replaced upstream; offered
+	// is its run if it did.
+	offer    bool
+	offered  *flatpakRun
 	branches map[string][]string
 	unlock   func()
 }
@@ -351,8 +386,13 @@ func experimentalExtra(r, old fr.ExtraRecord) []string {
 		if o, ok := findReplacement(old.Sources, rep.Name); ok && o.File == rep.File {
 			continue
 		}
+		instead := rep.Base.URL
+		if rep.URL == rep.Base.URL {
+			// Replaced upstream at the same URL (changed.go).
+			instead = fmt.Sprintf("the file it was built with (%s, sha256 %s)", units.Size(rep.Base.Size), rep.Base.SHA256)
+		}
 		out = append(out, fmt.Sprintf("rpak: experimental: %s downloads its extra-data %s from %s (%s, sha256 %s) instead of %s; that file is your choice, its packagers did not pick it.",
-			idOf(r.Ref), rep.Name, rep.URL, units.Size(rep.Size), rep.SHA256, rep.Base.URL))
+			idOf(r.Ref), rep.Name, rep.URL, units.Size(rep.Size), rep.SHA256, instead))
 	}
 	if len(out) == 0 {
 		// Only sources went.
@@ -667,7 +707,14 @@ func (f *forceFlow) runLocal(kind string, argv []string) int {
 // normal runs the command as given (without --force-runtime): nothing is
 // forced.
 func (f *forceFlow) normal() int {
-	return f.runTransaction(f.kind, f.cmdArgv(f.kind, args.StripForceRuntime(f.args)...))
+	argv := f.cmdArgv(f.kind, args.StripForceRuntime(f.args)...)
+	if !f.offer {
+		return f.runTransaction(f.kind, argv)
+	}
+	f.ran = true
+	run := runFlatpakWith(f.version, f.kind, argv, len(f.globals), true)
+	f.offered = &run
+	return run.code
 }
 
 // item is an app being patched.
@@ -863,9 +910,21 @@ func (f *forceFlow) replacements(it item) ([]extradata.Replacement, int, error) 
 			out = append(out, extradata.Replacement{Name: src.Name, File: extradata.File{URL: spec.URL, SHA256: "<sha256 of " + src.Name + ">"}, Base: extradata.FileOf(src)})
 			continue
 		}
-		got, err := f.fetchExtra(spec.URL, src.Name)
-		if err != nil {
-			return nil, 1, fmt.Errorf("downloading %s: %w", spec.URL, err)
+		var got metadata.Source
+		if k, ok := knownFiles[[2]string{spec.URL, src.Name}]; ok && prefetch.HasFile(k.Dir, k.Got) {
+			// Downloaded already, found replaced upstream (changed.go).
+			got = k.Got
+			got.URI = spec.URL
+			f.fetched = append(f.fetched, k.Dir)
+		} else {
+			var err error
+			if got, err = f.fetchExtra(spec.URL, src.Name); err != nil {
+				return nil, 1, fmt.Errorf("downloading %s: %w", spec.URL, err)
+			}
+		}
+		if got.URI == src.URI && got.Checksum == src.Checksum && got.Size == src.Size {
+			f.note("%s: %s is still the file the app was built with, not patching it", idOf(it.ref), spec.URL)
+			continue
 		}
 		out = append(out, extradata.Replacement{Name: src.Name, File: extradata.FileOf(got), Base: extradata.FileOf(src)})
 	}

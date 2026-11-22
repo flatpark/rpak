@@ -62,7 +62,19 @@ type Plan struct {
 	// Sources are unique by (checksum, name), in a stable order.
 	Sources  []metadata.Source
 	Warnings []string
+	// Origins are, for each source (by OriginKey), the refs that have it,
+	// with their installation and remote.
+	Origins map[[2]string][]Origin
 }
+
+// Origin is a ref that has a source: from Remote into Installation (an
+// installation option, such as args.User).
+type Origin struct {
+	Installation, Remote, Ref string
+}
+
+// OriginKey is the key of s in Plan.Origins.
+func OriginKey(s metadata.Source) [2]string { return [2]string{s.Checksum, s.Name} }
 
 // queryJobs bounds concurrent flatpak query processes; each remote-info may
 // fetch a commit object from the remote.
@@ -94,8 +106,7 @@ func Build(ctx context.Context, runner Runner, parsed args.Parsed) Plan {
 		results = p.install()
 	}
 
-	var plan Plan
-	seen := make(map[[2]string]bool)
+	plan := Plan{Origins: make(map[[2]string][]Origin)}
 	for _, r := range results {
 		sources, skipped := metadata.Parse(r.metadata, r.ref)
 		for _, s := range skipped {
@@ -104,11 +115,11 @@ func Build(ctx context.Context, runner Runner, parsed args.Parsed) Plan {
 		for _, s := range sources {
 			// Several refs, or the same ref in the user and the system
 			// installation, can share a file; one copy serves all of them.
-			key := [2]string{s.Checksum, s.Name}
-			if !seen[key] {
-				seen[key] = true
+			key := OriginKey(s)
+			if plan.Origins[key] == nil {
 				plan.Sources = append(plan.Sources, s)
 			}
+			plan.Origins[key] = append(plan.Origins[key], Origin{Installation: r.installation, Remote: r.remote, Ref: r.ref})
 		}
 	}
 	plan.Warnings = p.warnings
