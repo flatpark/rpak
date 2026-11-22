@@ -34,6 +34,9 @@ Commands:
              (see "rpak completion --help" for how to install it)
   patch      list, make or undo changes to installed apps (experimental,
              see below and "rpak patch --help")
+  self-update
+             replace rpak with its latest release
+             (see "rpak self-update --help")
   *          any other command runs "flatpak COMMAND ARGS..." unchanged
 
 On a terminal and without -y, flatpak starts at once and asks while rpak
@@ -66,6 +69,10 @@ Environment:
   RPAK_FLATPAK   flatpak executable to use (default: flatpak from PATH)
   RPAK_JOBS      concurrent downloads, 1-16 (default: 4)
   RPAK_DRY_RUN   if set to 1, only show the plan and the flatpak command
+  RPAK_RELEASE_BASE
+                 where rpak self-update and doctor look for rpak's
+                 releases, for testing and mirrors (default:
+                 https://github.com/flatpark/rpak/releases)
 `
 
 // flatpakPath is the flatpak to run: $RPAK_FLATPAK, or flatpak from PATH.
@@ -107,12 +114,14 @@ func passthrough(argv []string) int {
 // queryTimeout bounds each flatpak query command run while planning.
 const queryTimeout = 2 * time.Minute
 
-// Main runs rpak with os.Args and returns the exit code.
-func Main(version string) int {
-	return run(version, os.Args[1:])
+// Main runs rpak with os.Args and returns the exit code. selfUpdate is
+// main.selfUpdate: "disabled" in a build that a package manager installs,
+// which then updates rpak, not rpak self-update.
+func Main(version, selfUpdate string) int {
+	return run(version, selfUpdate != "disabled", os.Args[1:])
 }
 
-func run(version string, argv []string) int {
+func run(version string, selfUpdate bool, argv []string) int {
 	if len(argv) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -147,7 +156,9 @@ func run(version string, argv []string) int {
 	case "completion":
 		return completionCommand(argv[i+1:], os.Stdout, os.Stderr)
 	case "doctor":
-		return doctorCommand(version, argv[i+1:], os.Stdout, os.Stderr)
+		return doctorCommand(version, selfUpdate, argv[i+1:], os.Stdout, os.Stderr)
+	case "self-update":
+		return selfUpdateCommand(version, selfUpdate, argv[i+1:], os.Stdout, os.Stderr)
 	case "patch":
 		return patchCommand(version, argv[:i], argv[i+1:], os.Stdout, os.Stderr)
 	default:

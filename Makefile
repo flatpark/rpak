@@ -4,7 +4,7 @@ GOFMT   ?= mise x -- gofmt
 LDFLAGS := -s -w -X main.version=$(VERSION)
 BUILD   := CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)'
 
-.PHONY: all build test lint dist build-amd64 build-arm64 e2e e2e-clean clean
+.PHONY: all build test lint dist build-amd64 build-arm64 e2e e2e-releases e2e-clean clean
 
 all: lint test build
 
@@ -34,8 +34,15 @@ dist: build-amd64 build-arm64
 # End-to-end test with the distribution's flatpak in a debian:trixie
 # container (podman). The image and the runtime are cached (several hundred
 # MB the first time); E2E_FRESH=1 starts from scratch, e2e-clean removes them.
-e2e: build
+e2e: build e2e-releases
 	./test/e2e/run.sh
+
+# rpak self-update's test: this rpak built as two releases, which the test
+# serves as GitHub would.
+e2e-releases:
+	for v in v0.0.1 v0.0.2; do \
+		CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w -X main.version=$$v" -o test/e2e/out/self-update/$$v/rpak ./cmd/rpak || exit 1; \
+	done
 
 e2e-clean:
 	./test/e2e/run.sh --clean

@@ -27,6 +27,23 @@ chmod +x ~/.local/bin/rpak
 Optionally add `alias flatpak=rpak` to your shell's startup file. To build
 from source: `make build` (needs Go).
 
+## Updating rpak
+
+```sh
+rpak self-update            # to the latest release, after asking
+rpak self-update --check    # only tell: exits with 10 if there is a newer release
+```
+
+It downloads the release for your architecture, checks it against the
+release's `SHA256SUMS` and replaces the binary where it is (behind a
+symlink, the file the symlink points to). It needs to write to that
+directory: for `/usr/local/bin`, run it with `sudo`. `rpak self-update
+v0.3.5` installs that release, also an older one; `-y` does not ask. A
+development build (a version other than `vX.Y.Z`) is only replaced with
+`--force`. If a package manager or a tool manager such as mise installed
+rpak, update it with that. `rpak doctor` shows the latest release beside
+the running version.
+
 ## Usage
 
 Use `rpak` where you would use `flatpak`:
@@ -331,6 +348,7 @@ The app's data in `~/.var/app` stays where it is.
 | `RPAK_JOBS=N` | concurrent downloads, 1–16, default 4 |
 | `RPAK_DRY_RUN=1` | show the plan and the flatpak command, run nothing |
 | `RPAK_FLATPAK=PATH` | flatpak to run (default: `flatpak` from `PATH`) |
+| `RPAK_RELEASE_BASE=URL` | where `self-update` and `doctor` look for releases, for testing and mirrors (default: `https://github.com/flatpark/rpak/releases`) |
 
 ## Shell completion
 

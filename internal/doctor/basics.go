@@ -1,17 +1,13 @@
 package doctor
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
-	"github.com/flatpark/rpak/internal/prefetch"
+	"github.com/flatpark/rpak/internal/release"
 )
 
 var errNoFlatpak = errors.New("flatpak is not usable")
@@ -72,43 +68,47 @@ type releaseInfo struct {
 	err error
 }
 
-// latestRelease asks GitHub for the tag of rpak's latest release.
+// latestRelease is the tag of rpak's latest release (release.Latest).
 func (d *doctor) latestRelease() releaseInfo {
-	if d.cfg.ReleaseURL == "" {
+	if d.cfg.ReleaseBase == "" {
 		return releaseInfo{err: errors.New("not checked")}
 	}
 	ctx, cancel := withTimeout(d.ctx, d.cfg.NetTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.cfg.ReleaseURL, nil)
+	c := release.Client{Base: d.cfg.ReleaseBase, HTTP: d.cfg.Client, Version: d.cfg.Version}
+	tag, err := c.Latest(ctx)
 	if err != nil {
+		if release.IsNetwork(err) {
+			return releaseInfo{err: errors.New(errorClass(err))}
+		}
 		return releaseInfo{err: err}
 	}
-	req.Header.Set("User-Agent", prefetch.UserAgent(d.cfg.Version))
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := d.cfg.Client.Do(req)
-	if err != nil {
-		return releaseInfo{err: errors.New(errorClass(err))}
+	return releaseInfo{tag: tag}
+}
+
+// latestText is what the basics say about the latest release: its tag,
+// and how this build compares with it.
+func (d *doctor) latestText(rel releaseInfo) string {
+	if rel.err != nil {
+		return "latest release: " + rel.err.Error()
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return releaseInfo{err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+	text := "latest release " + rel.tag
+	build, ok := release.ParseBuild(d.cfg.Version)
+	latest, _ := release.ParseTag(rel.tag)
+	switch {
+	case !ok || build.Dev():
+		text += "; this is a development build"
+	case release.Compare(latest, build) > 0 && d.cfg.SelfUpdate:
+		text += ", newer: rpak self-update"
+	case release.Compare(latest, build) > 0:
+		text += ", newer"
 	}
-	var body struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil || body.TagName == "" {
-		return releaseInfo{err: errors.New("unexpected answer")}
-	}
-	return releaseInfo{tag: body.TagName}
+	return text
 }
 
 func (d *doctor) basicsSection(b *basicsInfo, rel releaseInfo) Section {
 	s := d.section("rpak and flatpak")
-	latest := "latest release " + rel.tag
-	if rel.err != nil {
-		latest = "latest release: " + rel.err.Error()
-	}
-	s.add("rpak %s  %s  (%s)", d.cfg.Version, d.cfg.Executable, latest)
+	s.add("rpak %s  %s  (%s)", d.cfg.Version, d.cfg.Executable, d.latestText(rel))
 
 	what := "flatpak in PATH"
 	if v, _ := d.cfg.LookupEnv("RPAK_FLATPAK"); v != "" {

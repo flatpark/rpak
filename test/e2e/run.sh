@@ -9,7 +9,7 @@
 # goes --user into a fresh directory in the container and is discarded, and
 # the extra-data are downloaded again every run.
 #
-# Usage: make e2e                (or: make build && test/e2e/run.sh)
+# Usage: make e2e                (or: make build e2e-releases && test/e2e/run.sh)
 #        E2E_FRESH=1 make e2e    build the image and the runtime from scratch,
 #                                in a throwaway image and volume
 #        make e2e-clean          (run.sh --clean) remove the cached image and volume
@@ -43,6 +43,10 @@ fi
 
 if [ ! -x "$repo/rpak" ]; then
 	echo "build rpak first (make build)" >&2
+	exit 1
+fi
+if [ ! -x "$here/out/self-update/v0.0.2/rpak" ]; then
+	echo "build the releases for the self-update test first (make e2e-releases)" >&2
 	exit 1
 fi
 mkdir -p "$here/out"

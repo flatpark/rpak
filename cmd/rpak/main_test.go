@@ -42,7 +42,15 @@ func TestMain(m *testing.M) {
 	}
 	if os.Getenv("RPAK_TEST_AS_MAIN") == "1" {
 		prefetch.DefaultBackoff = time.Millisecond
-		os.Exit(app.Main("test"))
+		// The version and the self-update switch as the build would set them.
+		version, selfUpdate := "test", "enabled"
+		if v := os.Getenv("RPAK_TEST_VERSION"); v != "" {
+			version = v
+		}
+		if v := os.Getenv("RPAK_TEST_SELF_UPDATE"); v != "" {
+			selfUpdate = v
+		}
+		os.Exit(app.Main(version, selfUpdate))
 	}
 	os.Exit(m.Run())
 }

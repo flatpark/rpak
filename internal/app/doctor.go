@@ -36,7 +36,7 @@ Options:
 `
 
 // doctorCommand is `rpak doctor`.
-func doctorCommand(version string, argv []string, stdout, stderr io.Writer) int {
+func doctorCommand(version string, selfUpdate bool, argv []string, stdout, stderr io.Writer) int {
 	var apps []string
 	dashes := false
 	for _, arg := range argv {
@@ -55,7 +55,7 @@ func doctorCommand(version string, argv []string, stdout, stderr io.Writer) int 
 			apps = append(apps, arg)
 		}
 	}
-	report := doctor.Run(context.Background(), doctor.NewConfig(version, flatpakPath(), apps))
+	report := doctor.Run(context.Background(), doctor.NewConfig(version, selfUpdate, flatpakPath(), apps))
 	if err := writeReport(stdout, report); err != nil {
 		fmt.Fprintf(stderr, "rpak doctor: %v\n", err)
 		return 1

@@ -50,7 +50,7 @@ func TestCompleteCommandNames(t *testing.T) {
 	e := newEnv(t)
 	e.write("complete-out", "install \nupdate \nlist \n")
 	out, code := e.complete(nil, "rpak ", "5", "")
-	if code != 0 || out != "install \nupdate \nlist \nclean \ncompletion \ndoctor \npatch \n" {
+	if code != 0 || out != "install \nupdate \nlist \nclean \ncompletion \ndoctor \npatch \nself-update \n" {
 		t.Errorf("exit %d, output %q", code, out)
 	}
 	if got, want := e.completeArgv(), []string{"flatpak ", "8", ""}; !slices.Equal(got, want) {
@@ -79,7 +79,7 @@ func TestCompleteCommandNamesWithoutFlatpak(t *testing.T) {
 	e := newEnv(t)
 	for _, flatpak := range []string{filepath.Join(e.fake, "missing"), "false"} {
 		env := []string{"RPAK_FLATPAK=" + flatpak}
-		if out, code := e.complete(env, "rpak ", "5", ""); code != 0 || out != "install \nupdate \nclean \ncompletion \ndoctor \npatch \n" {
+		if out, code := e.complete(env, "rpak ", "5", ""); code != 0 || out != "install \nupdate \nclean \ncompletion \ndoctor \npatch \nself-update \n" {
 			t.Errorf("%s: exit %d, output %q", flatpak, code, out)
 		}
 		if out, _ := e.complete(env, "rpak up", "7", "up"); out != "update \n" {
@@ -186,6 +186,29 @@ func TestCompleteClean(t *testing.T) {
 	}
 	if got, want := e.completeArgv(), []string{"flatpak --user clean --d", "24", "--d"}; !slices.Equal(got, want) {
 		t.Errorf("flatpak got %q, want %q", got, want)
+	}
+}
+
+func TestCompleteSelfUpdate(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"rpak self-update -", "18", "-"}, "--check \n--force \n-y \n--yes \n-h \n--help \n"},
+		{[]string{"rpak self-update --", "19", "--"}, "--check \n--force \n--yes \n--help \n"},
+		{[]string{"rpak -v self-update --c", "23", "--c"}, "--check \n"},
+		// Options already given are not offered again.
+		{[]string{"rpak self-update -y --check --", "30", "--"}, "--force \n--help \n"},
+		// VERSION is not completed.
+		{[]string{"rpak self-update ", "17", ""}, ""},
+		{[]string{"rpak self-update v0", "19", "v0"}, ""},
+		{[]string{"rpak self", "9", "self"}, "self-update \n"},
+	} {
+		out, code := e.complete(nil, c.argv...)
+		if code != 0 || out != c.want {
+			t.Errorf("%q: exit %d, output %q, want %q", c.argv, code, out, c.want)
+		}
 	}
 }
 
