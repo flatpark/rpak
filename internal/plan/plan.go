@@ -46,6 +46,9 @@ func (r ExecRunner) Output(ctx context.Context, argv ...string) ([]byte, error) 
 		if i := strings.IndexByte(msg, '\n'); i >= 0 {
 			msg = msg[:i]
 		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && r.Timeout > 0 {
+			return nil, fmt.Errorf("flatpak %s: no answer within %s: %w", argv[0], r.Timeout, ctx.Err())
+		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("flatpak %s: %w", argv[0], ctx.Err())
 		}
@@ -80,18 +83,31 @@ func OriginKey(s metadata.Source) [2]string { return [2]string{s.Checksum, s.Nam
 // fetch a commit object from the remote.
 const queryJobs = 4
 
+// Watch, if not nil, is told when a query starts (running) and ends; remote
+// is the remote it asks, "" for one that reads the installation only. It
+// may be called from several goroutines at once.
+type Watch func(remote string, running bool)
+
 type planner struct {
 	ctx    context.Context
 	runner Runner
 	parsed args.Parsed
+	watch  Watch
 
 	mu       sync.Mutex
 	warnings []string
+	// timedOut holds the remotes (installation and name) that did not
+	// answer a query in time: the next ones would wait as long again.
+	timedOut map[[2]string]bool
 }
 
+// errTimedOut is the error of a query not made because an earlier one to
+// the same remote timed out; that one was warned about.
+var errTimedOut = errors.New("an earlier query timed out")
+
 // Build works out the extra-data sources of the refs the command will pull.
-func Build(ctx context.Context, runner Runner, parsed args.Parsed) Plan {
-	p := &planner{ctx: ctx, runner: runner, parsed: parsed}
+func Build(ctx context.Context, runner Runner, parsed args.Parsed, watch Watch) Plan {
+	p := &planner{ctx: ctx, runner: runner, parsed: parsed, watch: watch, timedOut: make(map[[2]string]bool)}
 	for _, name := range parsed.Unknown {
 		p.warn("unknown option %s, assuming it takes no value", name)
 	}
@@ -124,6 +140,31 @@ func Build(ctx context.Context, runner Runner, parsed args.Parsed) Plan {
 	}
 	plan.Warnings = p.warnings
 	return plan
+}
+
+// query runs a flatpak query that asks remote of installation ("" for
+// none). A remote that did not answer in time is not asked again.
+func (p *planner) query(installation, remote string, argv ...string) ([]byte, error) {
+	key := [2]string{installation, remote}
+	if remote != "" {
+		p.mu.Lock()
+		skip := p.timedOut[key]
+		p.mu.Unlock()
+		if skip {
+			return nil, errTimedOut
+		}
+	}
+	if p.watch != nil {
+		p.watch(remote, true)
+		defer p.watch(remote, false)
+	}
+	out, err := p.runner.Output(p.ctx, argv...)
+	if remote != "" && errors.Is(err, context.DeadlineExceeded) && p.ctx.Err() == nil {
+		p.mu.Lock()
+		p.timedOut[key] = true
+		p.mu.Unlock()
+	}
+	return out, err
 }
 
 func (p *planner) warn(format string, a ...any) {
@@ -161,6 +202,9 @@ func (p *planner) update() []result {
 	results := p.remoteInfo(targets)
 	var ok []result
 	for _, r := range results {
+		if errors.Is(r.err, errTimedOut) {
+			continue
+		}
 		if r.err != nil {
 			p.warn("cannot read %s from %s (%s): %v", r.ref, r.remote, r.installation, r.err)
 			continue
@@ -170,22 +214,16 @@ func (p *planner) update() []result {
 	return ok
 }
 
-// pendingUpdates lists the refs of an installation that have updates.
+// pendingUpdates lists the refs of an installation that have updates. It
+// asks each remote that an installed ref comes from on its own, rather
+// than running remote-ls without REMOTE: that one fetches every remote's
+// summary, including those nothing is installed from (an OCI remote's
+// index can take minutes), and gives up as soon as one remote cannot be
+// reached. A remote that cannot be listed costs only its own updates.
 func (p *planner) pendingUpdates(installation string) []target {
-	argv := []string{"remote-ls", installation, "--updates", "--columns=ref,origin"}
-	if p.parsed.Arch != "" {
-		argv = append(argv, "--arch="+p.parsed.Arch)
-	}
-	out, err := p.runner.Output(p.ctx, argv...)
-	if err == nil {
-		return parseUpdates(installation, out)
-	}
-	// Without a REMOTE argument remote-ls gives up as soon as one remote
-	// cannot be reached; retry remote by remote so the others still count.
-	// If the installation itself is missing or unreadable, listing its
-	// remotes fails too, and there is nothing to do for it.
-	remotes, rerr := p.remotes(installation)
-	if rerr != nil {
+	remotes, err := p.originRemotes(installation)
+	if err != nil {
+		// A missing or unreadable installation: nothing to do for it.
 		if p.parsed.ExplicitInstallation {
 			p.warn("cannot list updates of %s: %v", installation, err)
 		}
@@ -193,7 +231,11 @@ func (p *planner) pendingUpdates(installation string) []target {
 	}
 	var targets []target
 	for _, ts := range parallel(remotes, func(remote string) []target {
-		out, err := p.runner.Output(p.ctx, append(argv, remote)...)
+		argv := []string{"remote-ls", installation, "--updates", "--columns=ref,origin"}
+		if p.parsed.Arch != "" {
+			argv = append(argv, "--arch="+p.parsed.Arch)
+		}
+		out, err := p.query(installation, remote, append(argv, remote)...)
 		if err != nil {
 			p.warn("cannot list updates from %s (%s): %v", remote, installation, err)
 			return nil
@@ -203,6 +245,35 @@ func (p *planner) pendingUpdates(installation string) []target {
 		targets = append(targets, ts...)
 	}
 	return targets
+}
+
+// originRemotes returns the enabled remotes of an installation that
+// installed refs (extensions included) come from, in the order flatpak
+// lists the remotes. Updates come from a ref's origin; a remote nothing
+// is installed from has none.
+func (p *planner) originRemotes(installation string) ([]string, error) {
+	out, err := p.query(installation, "", "list", installation, "--all", "--columns=origin")
+	if err != nil {
+		return nil, err
+	}
+	used := make(map[string]bool)
+	for _, name := range strings.Fields(string(out)) {
+		used[name] = true
+	}
+	if len(used) == 0 {
+		return nil, nil
+	}
+	remotes, err := p.remotes(installation)
+	if err != nil {
+		return nil, err
+	}
+	var keep []string
+	for _, r := range remotes {
+		if used[r] {
+			keep = append(keep, r)
+		}
+	}
+	return keep, nil
 }
 
 // parseUpdates reads `remote-ls --columns=ref,origin` output. When stdout
@@ -267,6 +338,9 @@ func (p *planner) install() []result {
 		}
 		var ok []result
 		for _, r := range p.remoteInfo(targets) {
+			if errors.Is(r.err, errTimedOut) {
+				continue
+			}
 			if r.err != nil {
 				p.warn("cannot read %s from %s (%s): %v", r.ref, r.remote, r.installation, r.err)
 				continue
@@ -321,7 +395,7 @@ func (p *planner) install() []result {
 }
 
 func (p *planner) remotes(installation string) ([]string, error) {
-	out, err := p.runner.Output(p.ctx, "remotes", installation, "--columns=name")
+	out, err := p.query(installation, "", "remotes", installation, "--columns=name")
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +411,7 @@ func (p *planner) remoteInfo(targets []target) []result {
 			argv = append(argv, "--arch="+p.parsed.Arch)
 		}
 		argv = append(argv, t.remote, t.ref)
-		out, err := p.runner.Output(p.ctx, argv...)
+		out, err := p.query(t.installation, t.remote, argv...)
 		if err != nil {
 			return result{target: t, err: err}
 		}

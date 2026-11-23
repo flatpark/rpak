@@ -55,7 +55,9 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// fakeFlatpak answers queries from files in $FAKE_DIR. When run as
+// fakeFlatpak answers queries from files in $FAKE_DIR: remote-ls REMOTE
+// and the origins of installed refs from updates-INSTALLATION, remotes from
+// remotes-INSTALLATION (else the origins in updates-). When run as
 // update/install it records its argv (NUL-separated) and the name of the
 // terminal of its stdin (tty), checks that the files listed in
 // $FAKE_DIR/expect are in place with the right checksum, and then behaves
@@ -72,9 +74,14 @@ inst=${2#--}
 for a; do case "$a" in -v*|--verbose|--ostree-verbose) ;; *) cmd=$a; break ;; esac; done
 case "$cmd" in
 remotes)
-	cat "$d/remotes-$inst" 2>/dev/null || { echo "error: no installation" >&2; exit 1; } ;;
+	if [ -f "$d/remotes-$inst" ]; then cat "$d/remotes-$inst"
+	elif [ -f "$d/updates-$inst" ]; then cut -f2 "$d/updates-$inst" | sort -u
+	else echo "error: no installation" >&2; exit 1; fi ;;
 remote-ls)
-	cat "$d/updates-$inst" 2>/dev/null || { echo "error: no installation" >&2; exit 1; } ;;
+	# remote-ls INSTALLATION --updates --columns=ref,origin REMOTE
+	for a; do remote=$a; done
+	[ -f "$d/updates-$inst" ] || { echo "error: no installation" >&2; exit 1; }
+	awk -F'\t' -v r="$remote" '$2 == r' "$d/updates-$inst" ;;
 remote-info)
 	for a; do remote=$ref; ref=$a; done
 	f="$d/info/$inst/$remote/$(echo "$ref" | tr / _)"
@@ -146,6 +153,13 @@ permission-reset)
 	[ -f "$d/permission-reset-fail" ] && { echo "error: no session bus" >&2; exit 1; }
 	exit 0 ;;
 uninstall|list|clean|--version)
+	if [ "$cmd $3 $4" = "list --all --columns=origin" ]; then
+		# rpak's query for the origins of the installed refs: those with
+		# updates, at least.
+		if [ -f "$d/updates-$inst" ]; then cut -f2 "$d/updates-$inst"
+		elif [ ! -f "$d/remotes-$inst" ]; then echo "error: no installation" >&2; exit 1; fi
+		exit 0
+	fi
 	printf '%s\0' "$@" > "$d/argv"
 	echo "fake flatpak $cmd"
 	exit 5 ;;
