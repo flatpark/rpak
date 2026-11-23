@@ -44,7 +44,7 @@ func TestNoRecordsNoExtraCalls(t *testing.T) {
 	}
 	for _, call := range strings.Split(strings.TrimSpace(e.read("calls")), "\n") {
 		cmd := strings.Fields(call)[0]
-		if cmd != "remote-ls" && cmd != "remotes" && cmd != "remote-info" && cmd != "update" {
+		if cmd != "list" && cmd != "remote-ls" && cmd != "remotes" && cmd != "remote-info" && cmd != "update" {
 			t.Errorf("update ran flatpak %s", call)
 		}
 	}

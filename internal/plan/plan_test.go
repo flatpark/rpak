@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ import (
 // fakeRunner answers flatpak queries from a table keyed by the joined argv.
 type fakeRunner struct {
 	answers map[string]string
+	errs    map[string]error
 
 	mu    sync.Mutex
 	calls []string
@@ -25,6 +27,9 @@ func (f *fakeRunner) Output(_ context.Context, argv ...string) ([]byte, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, key)
 	f.mu.Unlock()
+	if err, ok := f.errs[key]; ok {
+		return nil, err
+	}
 	if out, ok := f.answers[key]; ok {
 		return []byte(out), nil
 	}
@@ -54,14 +59,19 @@ const (
 
 func TestUpdate(t *testing.T) {
 	runner := &fakeRunner{answers: map[string]string{
-		"remote-ls --user --updates --columns=ref,origin":                    chrome + "\tflatpark\n" + plain + "\tflathub\n",
-		"remote-ls --system --updates --columns=ref,origin":                  zoom + "\tflatpark\n" + chrome + "\tflatpark\n",
+		"list --user --all --columns=origin":                                 "flatpark\nflathub\nflathub\n",
+		"remotes --user --columns=name":                                      "flathub\nflatpark\n",
+		"remote-ls --user --updates --columns=ref,origin flatpark":           chrome + "\tflatpark\n",
+		"remote-ls --user --updates --columns=ref,origin flathub":            plain + "\tflathub\n",
+		"list --system --all --columns=origin":                               "flatpark\n",
+		"remotes --system --columns=name":                                    "flathub\nflatpark\n",
+		"remote-ls --system --updates --columns=ref,origin flatpark":         zoom + "\tflatpark\n" + chrome + "\tflatpark\n",
 		"remote-info --user --show-ref --show-metadata flatpark " + chrome:   extraData(chrome, "chrome.deb", 'a'),
 		"remote-info --system --show-ref --show-metadata flatpark " + chrome: extraData(chrome, "chrome.deb", 'a'),
 		"remote-info --system --show-ref --show-metadata flatpark " + zoom:   extraData(zoom, "zoom.deb", 'b'),
 		"remote-info --user --show-ref --show-metadata flathub " + plain:     plain + "\n[Application]\nname=x\n",
 	}}
-	p := Build(context.Background(), runner, args.Parse("update", nil))
+	p := Build(context.Background(), runner, args.Parse("update", nil), nil)
 	if got, want := names(p), []string{"chrome.deb", "zoom.deb"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources = %q, want %q (warnings %q)", got, want, p.Warnings)
 	}
@@ -71,12 +81,12 @@ func TestUpdate(t *testing.T) {
 
 	// REF arguments filter the updates: app id, partial and full refs.
 	for _, filter := range []string{"us.zoom.Zoom", "us.zoom.Zoom//stable", zoom, "app/us.zoom.Zoom"} {
-		p = Build(context.Background(), runner, args.Parse("update", []string{"-y", filter}))
+		p = Build(context.Background(), runner, args.Parse("update", []string{"-y", filter}), nil)
 		if got := names(p); !reflect.DeepEqual(got, []string{"zoom.deb"}) {
 			t.Errorf("filter %q: sources = %q", filter, got)
 		}
 	}
-	p = Build(context.Background(), runner, args.Parse("update", []string{"us.zoom.Zoom//beta", "runtime/us.zoom.Zoom"}))
+	p = Build(context.Background(), runner, args.Parse("update", []string{"us.zoom.Zoom//beta", "runtime/us.zoom.Zoom"}), nil)
 	if len(p.Sources) != 0 {
 		t.Errorf("non-matching filters: sources = %q", names(p))
 	}
@@ -84,10 +94,12 @@ func TestUpdate(t *testing.T) {
 
 func TestUpdateInstallationOptionsAndArch(t *testing.T) {
 	runner := &fakeRunner{answers: map[string]string{
-		"remote-ls --installation=extra --updates --columns=ref,origin --arch=aarch64":                                             "app/com.google.Chrome/aarch64/stable\tflatpark\n",
+		"list --installation=extra --all --columns=origin":                                                                         "flatpark\n",
+		"remotes --installation=extra --columns=name":                                                                              "flatpark\n",
+		"remote-ls --installation=extra --updates --columns=ref,origin --arch=aarch64 flatpark":                                    "app/com.google.Chrome/aarch64/stable\tflatpark\n",
 		"remote-info --installation=extra --show-ref --show-metadata --arch=aarch64 flatpark app/com.google.Chrome/aarch64/stable": extraData("app/com.google.Chrome/aarch64/stable", "chrome.deb", 'c'),
 	}}
-	p := Build(context.Background(), runner, args.Parse("update", []string{"--installation", "extra", "--arch=aarch64"}))
+	p := Build(context.Background(), runner, args.Parse("update", []string{"--installation", "extra", "--arch=aarch64"}), nil)
 	if got := names(p); !reflect.DeepEqual(got, []string{"chrome.deb"}) {
 		t.Fatalf("sources = %q, calls %q", got, runner.calls)
 	}
@@ -98,28 +110,99 @@ func TestUpdateInstallationOptionsAndArch(t *testing.T) {
 	}
 }
 
-func TestUpdateFallsBackToPerRemoteListing(t *testing.T) {
-	// remote-ls without REMOTE fails when one remote is unreachable.
+func TestUpdateAsksOnlyRemotesInUse(t *testing.T) {
+	// Nothing is installed from fedora, whose OCI index is slow to fetch,
+	// and disabled is not listed by remotes; neither is asked. broken
+	// cannot be reached, which costs only its own updates.
 	runner := &fakeRunner{answers: map[string]string{
-		"remotes --user --columns=name":                                    "flatpark\nbroken\n",
+		"list --user --all --columns=origin":                               "flatpark\nbroken\ndisabled\n",
+		"remotes --user --columns=name":                                    "fedora\nflatpark\nbroken\n",
 		"remote-ls --user --updates --columns=ref,origin flatpark":         chrome + "\tflatpark\n",
 		"remote-info --user --show-ref --show-metadata flatpark " + chrome: extraData(chrome, "chrome.deb", 'a'),
 	}}
-	p := Build(context.Background(), runner, args.Parse("update", []string{"--user"}))
+	p := Build(context.Background(), runner, args.Parse("update", []string{"--user"}), nil)
 	if got := names(p); !reflect.DeepEqual(got, []string{"chrome.deb"}) {
 		t.Fatalf("sources = %q, calls %q", got, runner.calls)
 	}
 	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "broken") {
 		t.Errorf("warnings = %q", p.Warnings)
 	}
+	for _, call := range runner.calls {
+		if strings.HasSuffix(call, " fedora") || strings.HasSuffix(call, " disabled") {
+			t.Errorf("asked a remote nothing is installed from: %q", call)
+		}
+	}
+}
+
+func TestUpdateTimedOutRemoteIsNotAskedAgain(t *testing.T) {
+	fedora := "app/org.fedoraproject.A/x86_64/stable"
+	other := "app/org.fedoraproject.B/x86_64/stable"
+	runner := &fakeRunner{
+		answers: map[string]string{
+			"list --user --all --columns=origin":                            "fedora\nfedora\n",
+			"remotes --user --columns=name":                                 "fedora\n",
+			"remote-ls --user --updates --columns=ref,origin fedora":        fedora + "\tfedora\n" + other + "\tfedora\n",
+			"remote-info --user --show-ref --show-metadata fedora " + other: extraData(other, "b.deb", 'b'),
+		},
+		errs: map[string]error{
+			"remote-info --user --show-ref --show-metadata fedora " + fedora: fmt.Errorf("flatpak remote-info: no answer within 2m0s: %w", context.DeadlineExceeded),
+		},
+	}
+	// One query at a time, so that the timeout comes first.
+	p := &planner{ctx: context.Background(), runner: runner, parsed: args.Parse("update", []string{"--user"}), timedOut: make(map[[2]string]bool)}
+	results := []result{}
+	for _, ref := range []string{fedora, other} {
+		results = append(results, p.remoteInfo([]target{{"--user", "fedora", ref}})...)
+	}
+	if !errors.Is(results[0].err, context.DeadlineExceeded) || !errors.Is(results[1].err, errTimedOut) {
+		t.Fatalf("results = %#v", results)
+	}
+	n := 0
+	for _, call := range runner.calls {
+		if strings.HasPrefix(call, "remote-info") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("remote-info ran %d times: %q", n, runner.calls)
+	}
+}
+
+func TestUpdateWatch(t *testing.T) {
+	runner := &fakeRunner{answers: map[string]string{
+		"list --user --all --columns=origin":                       "flatpark\n",
+		"remotes --user --columns=name":                            "flatpark\n",
+		"remote-ls --user --updates --columns=ref,origin flatpark": "",
+	}}
+	var mu sync.Mutex
+	running := map[string]int{}
+	var seen []string
+	Build(context.Background(), runner, args.Parse("update", []string{"--user"}), func(remote string, on bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if on {
+			running[remote]++
+			seen = append(seen, remote)
+		} else {
+			running[remote]--
+		}
+	})
+	if !reflect.DeepEqual(seen, []string{"", "", "flatpark"}) {
+		t.Errorf("seen = %q", seen)
+	}
+	for r, n := range running {
+		if n != 0 {
+			t.Errorf("%q left running: %d", r, n)
+		}
+	}
 }
 
 func TestUpdateMissingInstallationIsSilent(t *testing.T) {
 	// No system installation at all: nothing to do, nothing to warn about.
 	runner := &fakeRunner{answers: map[string]string{
-		"remote-ls --user --updates --columns=ref,origin": "",
+		"list --user --all --columns=origin": "",
 	}}
-	p := Build(context.Background(), runner, args.Parse("update", nil))
+	p := Build(context.Background(), runner, args.Parse("update", nil), nil)
 	if len(p.Sources) != 0 || len(p.Warnings) != 0 {
 		t.Fatalf("plan = %#v", p)
 	}
@@ -132,7 +215,7 @@ func TestInstallWithRemote(t *testing.T) {
 		"remote-info --user --show-ref --show-metadata flatpark com.google.Chrome": extraData(chrome, "chrome.deb", 'a'),
 		"remote-info --user --show-ref --show-metadata flatpark us.zoom.Zoom":      extraData(zoom, "zoom.deb", 'b'),
 	}}
-	p := Build(context.Background(), runner, args.Parse("install", []string{"-y", "flatpark", "com.google.Chrome", "us.zoom.Zoom"}))
+	p := Build(context.Background(), runner, args.Parse("install", []string{"-y", "flatpark", "com.google.Chrome", "us.zoom.Zoom"}), nil)
 	if got := names(p); !reflect.DeepEqual(got, []string{"chrome.deb", "zoom.deb"}) {
 		t.Fatalf("sources = %q, warnings %q", got, p.Warnings)
 	}
@@ -156,7 +239,7 @@ func TestInstallSameRemoteInBothInstallations(t *testing.T) {
 		"remote-info --system --show-ref --show-metadata flatpark com.google.Chrome": extraData(chrome, "chrome.deb", 'b'),
 	}}
 	for _, argv := range [][]string{{"flatpark", "com.google.Chrome"}, {"com.google.Chrome"}} {
-		p := Build(context.Background(), runner, args.Parse("install", argv))
+		p := Build(context.Background(), runner, args.Parse("install", argv), nil)
 		if len(p.Sources) != 2 {
 			t.Errorf("%q: sources = %#v", argv, p.Sources)
 		}
@@ -174,23 +257,23 @@ func TestInstallWithoutRemote(t *testing.T) {
 	}
 	runner := &fakeRunner{answers: answers}
 
-	p := Build(context.Background(), runner, args.Parse("install", []string{"com.google.Chrome"}))
+	p := Build(context.Background(), runner, args.Parse("install", []string{"com.google.Chrome"}), nil)
 	if got := names(p); !reflect.DeepEqual(got, []string{"chrome.deb"}) {
 		t.Errorf("unique remote: sources = %q", got)
 	}
 
-	p = Build(context.Background(), runner, args.Parse("install", []string{"us.zoom.Zoom"}))
+	p = Build(context.Background(), runner, args.Parse("install", []string{"us.zoom.Zoom"}), nil)
 	if len(p.Sources) != 0 || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "several remotes") {
 		t.Errorf("ambiguous remote: plan = %#v", p)
 	}
 
-	p = Build(context.Background(), runner, args.Parse("install", []string{"org.missing.App"}))
+	p = Build(context.Background(), runner, args.Parse("install", []string{"org.missing.App"}), nil)
 	if len(p.Sources) != 0 || len(p.Warnings) != 1 {
 		t.Errorf("missing ref: plan = %#v", p)
 	}
 
 	// flatpak installs every REF from the remote chosen for the first one.
-	p = Build(context.Background(), runner, args.Parse("install", []string{"com.google.Chrome", "us.zoom.Zoom"}))
+	p = Build(context.Background(), runner, args.Parse("install", []string{"com.google.Chrome", "us.zoom.Zoom"}), nil)
 	if got := names(p); !reflect.DeepEqual(got, []string{"chrome.deb", "zoom.deb"}) {
 		t.Errorf("remote from first ref: sources = %q", got)
 	}
@@ -201,7 +284,7 @@ func TestInstallSingleArgumentIsARef(t *testing.T) {
 		"remotes --user --columns=name":                                   "flatpark\n",
 		"remote-info --user --show-ref --show-metadata flatpark flatpark": extraData("app/flatpark/x86_64/stable", "f.bin", 'a'),
 	}}
-	p := Build(context.Background(), runner, args.Parse("install", []string{"--user", "flatpark"}))
+	p := Build(context.Background(), runner, args.Parse("install", []string{"--user", "flatpark"}), nil)
 	if got := names(p); !reflect.DeepEqual(got, []string{"f.bin"}) {
 		t.Errorf("sources = %q", got)
 	}
@@ -209,7 +292,7 @@ func TestInstallSingleArgumentIsARef(t *testing.T) {
 
 func TestSkipRunsNoQueries(t *testing.T) {
 	runner := &fakeRunner{}
-	p := Build(context.Background(), runner, args.Parse("install", []string{"--from", "x.flatpakref"}))
+	p := Build(context.Background(), runner, args.Parse("install", []string{"--from", "x.flatpakref"}), nil)
 	if len(p.Sources) != 0 || len(runner.calls) != 0 {
 		t.Fatalf("plan = %#v, calls = %q", p, runner.calls)
 	}
@@ -217,10 +300,12 @@ func TestSkipRunsNoQueries(t *testing.T) {
 
 func TestUnknownOptionWarnsOnceAndStillPlans(t *testing.T) {
 	runner := &fakeRunner{answers: map[string]string{
-		"remote-ls --user --updates --columns=ref,origin":                  chrome + "\tflatpark\n",
+		"list --user --all --columns=origin":                               "flatpark\n",
+		"remotes --user --columns=name":                                    "flatpark\n",
+		"remote-ls --user --updates --columns=ref,origin flatpark":         chrome + "\tflatpark\n",
 		"remote-info --user --show-ref --show-metadata flatpark " + chrome: extraData(chrome, "chrome.deb", 'a'),
 	}}
-	p := Build(context.Background(), runner, args.Parse("update", []string{"--user", "--shiny", "--shiny"}))
+	p := Build(context.Background(), runner, args.Parse("update", []string{"--user", "--shiny", "--shiny"}), nil)
 	if len(p.Sources) != 1 || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "--shiny") {
 		t.Fatalf("plan = %#v", p)
 	}
@@ -229,10 +314,12 @@ func TestUnknownOptionWarnsOnceAndStillPlans(t *testing.T) {
 func TestInvalidExtraDataIsWarnedAndSkipped(t *testing.T) {
 	bad := chrome + "\n[Extra Data]\nchecksum=" + strings.Repeat("a", 64) + "\nsize=1\nuri=https://example.com/get?id=1\n"
 	runner := &fakeRunner{answers: map[string]string{
-		"remote-ls --user --updates --columns=ref,origin":                  chrome + "\tflatpark\n",
+		"list --user --all --columns=origin":                               "flatpark\n",
+		"remotes --user --columns=name":                                    "flatpark\n",
+		"remote-ls --user --updates --columns=ref,origin flatpark":         chrome + "\tflatpark\n",
 		"remote-info --user --show-ref --show-metadata flatpark " + chrome: bad,
 	}}
-	p := Build(context.Background(), runner, args.Parse("update", []string{"--user"}))
+	p := Build(context.Background(), runner, args.Parse("update", []string{"--user"}), nil)
 	if len(p.Sources) != 0 || len(p.Warnings) != 1 {
 		t.Fatalf("plan = %#v", p)
 	}

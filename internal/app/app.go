@@ -441,7 +441,9 @@ func prefetchPhase(ctx context.Context, version, command, flatpak string, flatpa
 		}
 	}
 
-	p := plan.Build(ctx, plan.ExecRunner{Path: flatpak, Timeout: queryTimeout}, parsed)
+	status := newPlanStatus(os.Stderr, detectTerm(os.Stderr))
+	p := plan.Build(ctx, plan.ExecRunner{Path: flatpak, Timeout: queryTimeout}, parsed, status.watch)
+	status.close()
 	if ctx.Err() != nil {
 		return prep
 	}
